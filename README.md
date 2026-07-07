@@ -29,10 +29,10 @@ An addon that improves the character panel and the inspect panel by displaying p
 This addon **requires** [Nampower](https://gitea.com/avitasia/nampower). Make sure to download and install it beforehand.  
 It is also **strongly recommended** to install [Better Character Stats](https://github.com/pepopo978/BetterCharacterStats) to improve the character panel even further.
 
-### Turtle WoW Launcher (**Recommended**)
-
-1. Open the Turtle WoW Launcher and navigate to the `ADDONS` tab at the top.
-2. Press the `Add new addon` button and paste the following URL into the field: `https://github.com/Arthur-Helias/BetterCharacterPanel.git`.
+### Wuddle (**Recommended**)
+  
+1. Open [Wuddle](https://github.com/ZythDr/Wuddle) and navigate to the `Addons` tab at the top.
+2. Click the `+ Add` button and paste the URL `https://github.com/Arthur-Helias/BetterCharacterPanel.git` into the `Addon Repo URL` field, then click the `Add addon` button.
 3. Enable the addon from the addons menu on the character selection screen.
 
 ### Manual installation
