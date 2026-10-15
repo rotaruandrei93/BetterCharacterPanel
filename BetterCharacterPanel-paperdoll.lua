@@ -280,7 +280,13 @@ function BCP_CreateBCSCompatStatFrame(skin, parent, name, yOffset, cardWidth)
     frame:EnableMouse(true)
     frame:SetScript("OnLeave", function() GameTooltip:Hide() end)
 
-    local label = frame:CreateFontString(nil, "OVERLAY", labelFontTemplate)
+    -- PERF FIX: the text belongs to the card (6 frames), not to each row frame (36 frames). The row
+    -- frame is kept only for mouse/tooltips and the text is anchored to it. Drawing text from many
+    -- separate frames inside a scroll area cost about half of the FPS.
+    -- (the card's text frame sits above the card's own backdrop; pfUI draws its backdrop as a child frame
+    -- that would otherwise dim the text)
+    local textParent = parent.bcpTextFrame or parent
+    local label = textParent:CreateFontString(nil, "OVERLAY", labelFontTemplate)
     label:SetPoint("LEFT", frame, "LEFT", leftPad, 0)
     label:SetWidth(labelWidth)
     label:SetJustifyH("LEFT")
@@ -292,7 +298,7 @@ function BCP_CreateBCSCompatStatFrame(skin, parent, name, yOffset, cardWidth)
 
     _G[name .. "Label"] = label
 
-    local valueText = frame:CreateFontString(nil, "OVERLAY", valueFontTemplate)
+    local valueText = textParent:CreateFontString(nil, "OVERLAY", valueFontTemplate)
     valueText:SetPoint("RIGHT", frame, "RIGHT", -rightPad, 0)
     valueText:SetWidth(valueWidth)
     valueText:SetJustifyH("RIGHT")
@@ -430,6 +436,7 @@ function BCP_BuildScrollContent(skin, contentFrame, scrollFrame, scrollBar, bcsC
             local titleFrame = CreateFrame("Frame", nil, card)
             titleFrame:SetAllPoints(card)
             titleFrame:SetFrameLevel(card:GetFrameLevel() + 2)
+            card.bcpTextFrame = titleFrame
 
             local title = titleFrame:CreateFontString(nil, "OVERLAY")
             local fontPath, fontSize, fontFlags = skin:GetCardTitleFont()
@@ -804,13 +811,54 @@ end
 
 local _Orig_PaperDollFrame_OnEvent = PaperDollFrame_OnEvent
 
+-- PERF FIX: every paper doll event used to trigger a full refresh (tooltip scans of all slots plus a
+-- full BCS stat recalculation). Events now only set a flag; one refresh runs at most every 0.3s,
+-- and only while the window is open.
+local BCP_QueueFrame = CreateFrame("Frame")
+local BCP_QueueItems, BCP_QueueStats, BCP_QueueTimer = false, false, 0
+
+local function BCP_QueueOnUpdate()
+    BCP_QueueTimer = BCP_QueueTimer - arg1
+
+    if BCP_QueueTimer > 0 then
+        return
+    end
+
+    BCP_QueueFrame:SetScript("OnUpdate", nil)
+
+    local doItems, doStats = BCP_QueueItems, BCP_QueueStats
+    BCP_QueueItems, BCP_QueueStats = false, false
+
+    if not (PaperDollFrame and PaperDollFrame:IsVisible()) then
+        return
+    end
+
+    if doItems then
+        BCP_Refresh("player", "BCP_")
+    end
+
+    if doStats then
+        BCP_RefreshBCSSections(false)
+    end
+end
+
+local function BCP_QueueRefresh(items, stats)
+    if items then BCP_QueueItems = true end
+    if stats then BCP_QueueStats = true end
+
+    if not BCP_QueueFrame:GetScript("OnUpdate") then
+        BCP_QueueTimer = 0.3
+        BCP_QueueFrame:SetScript("OnUpdate", BCP_QueueOnUpdate)
+    end
+end
+
 function PaperDollFrame_OnEvent(event, arg1)
     if _Orig_PaperDollFrame_OnEvent then
         _Orig_PaperDollFrame_OnEvent(event, arg1)
     end
 
     if PaperDollFrame:IsVisible() then
-        BCP_Refresh("player", "BCP_")
+        BCP_QueueRefresh(true, false)
     end
 
     if event == "UNIT_INVENTORY_CHANGED" then
@@ -821,7 +869,7 @@ function PaperDollFrame_OnEvent(event, arg1)
         end
 
         if arg1 == "player" and PaperDollFrame:IsVisible() then
-            BCP_RefreshBCSSections(false)
+            BCP_QueueRefresh(false, true)
         end
     end
 end
