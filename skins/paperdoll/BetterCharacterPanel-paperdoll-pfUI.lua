@@ -59,7 +59,20 @@ skin.FrameValues = {
 skin.Config = {
     -- Character model position
     ModelOffsetX = 65,
-    ModelOffsetY = -120,
+    ModelOffsetY = -160, -- stock was -120; more negative = lower
+    -- Character model size (1.0 = stock). The model's viewport is scaled by this and the model
+    -- itself is scaled back by 1/this, so the model is this much bigger but never cropped.
+    ModelScale = 1.25,
+    -- Extra viewport width (1.0 = stock). Raise it if the sides of the model (shoulders, weapons)
+    -- get cropped, especially when the model is turned sideways.
+    ModelWidthFactor = 1.2,
+    -- Extra viewport height (1.0 = stock), added equally above and below. Raise it if the top of
+    -- the model (head, shoulders) gets cropped.
+    ModelHeightFactor = 1.4,
+
+    -- Outfitter window position, relative to the top-right corner of the character window
+    OutfitterOffsetX = 0,
+    OutfitterOffsetY = -27,
 
     -- BCP added information panel
     InfoFrameXOffset = 357,
@@ -90,7 +103,7 @@ skin.Config = {
     NativeStatRowHeight = 13,
 
     -- Scroll frame
-    ScrollTopPad = 56,
+    ScrollTopPad = 68,
     ScrollBottomPad = 15,
 }
 
@@ -198,13 +211,81 @@ local function BCP_AnchorResistanceFrame(infoFrame, aboveSection, cfg)
     for _, child in ipairs({ CharacterResistanceFrame:GetChildren() }) do
         child:ClearAllPoints()
         child:SetPoint("TOPLEFT", CharacterResistanceFrame, "TOPLEFT", xOffset, 0)
+
+        -- FIX: center the resistance number inside its icon
+        for _, region in ipairs({ child:GetRegions() }) do
+            if region:GetObjectType() == "FontString" then
+                region:ClearAllPoints()
+                region:SetPoint("CENTER", child, "CENTER", 0, 0)
+                region:SetDrawLayer("OVERLAY")
+            end
+        end
         xOffset = xOffset + cfg.ResistanceItemWidth + cfg.ResistanceItemSpacing
     end
 
     CharacterResistanceFrame:SetWidth(xOffset)
     CharacterResistanceFrame:SetHeight(cfg.ResistanceFrameHeight)
+
+    -- FIX: draw above the backdrop/cards and shrink so the row clears the close button
+    CharacterResistanceFrame:SetFrameStrata("HIGH")
+    CharacterResistanceFrame:SetScale(0.85)
 end
 
+
+-- FIX: the info frame hangs below the visible window, so anchor the scroll area's
+-- bottom to the unified backdrop instead of the info frame's bottom.
+local function BCP_FitScrollBottom(cfg)
+    local info = BCPPFUICharacterInformationFrame
+    local scroll = BCPPFUIStatsScrollFrame
+    local bd = BCPPFUIUnifiedBackdrop and BCPPFUIUnifiedBackdrop.backdrop
+
+    if not (info and scroll and bd) then
+        return
+    end
+
+    local bdBottom, infoBottom = bd:GetBottom(), info:GetBottom()
+
+    if not bdBottom or not infoBottom then
+        return
+    end
+
+    local overhang = bdBottom - infoBottom
+
+    if overhang < 0 then
+        overhang = 0
+    end
+
+    scroll:ClearAllPoints()
+    scroll:SetPoint("TOPLEFT", info, "TOPLEFT", 2, -cfg.ScrollTopPad)
+    scroll:SetPoint("BOTTOMRIGHT", info, "BOTTOMRIGHT", 0, overhang + 6)
+end
+
+-- FIX: Outfitter anchors itself to the stock character frame, which is now narrower than the
+-- stats panel, so it opens on top of it. Anchor it to the right edge of our backdrop instead.
+local function BCP_AnchorOutfitter(cfg)
+    local bd = BCPPFUIUnifiedBackdrop and BCPPFUIUnifiedBackdrop.backdrop
+
+    if not (OutfitterFrame and bd) then
+        return
+    end
+
+    OutfitterFrame:ClearAllPoints()
+    OutfitterFrame:SetPoint("TOPLEFT", bd, "TOPRIGHT", cfg.OutfitterOffsetX or 0, cfg.OutfitterOffsetY or 0)
+
+    if not OutfitterFrame.bcpHooked then
+        OutfitterFrame.bcpHooked = true
+
+        local origOnShow = OutfitterFrame:GetScript("OnShow")
+
+        OutfitterFrame:SetScript("OnShow", function()
+            if origOnShow then
+                origOnShow()
+            end
+
+            BCP_AnchorOutfitter(cfg)
+        end)
+    end
+end
 
 -- ==============================
 -- =   Paper Doll Frame Hooks   =
@@ -219,7 +300,33 @@ function skin:OnPaperDollShow()
     -- Shift the model downward to center it
     if CharacterModelFrame then
         CharacterModelFrame:ClearAllPoints()
-        CharacterModelFrame:SetPoint("TOPLEFT", PaperDollFrame, "TOPLEFT", cfg.ModelOffsetX, cfg.ModelOffsetY)
+
+        -- Enlarge the whole model frame (the model grows with its viewport, so nothing gets
+        -- clipped), keeping its centre where the unscaled frame's centre would be.
+        local scale = cfg.ModelScale or 1
+        if not CharacterModelFrame.bcpOrigW then
+            CharacterModelFrame.bcpOrigW = CharacterModelFrame:GetWidth()
+            CharacterModelFrame.bcpOrigH = CharacterModelFrame:GetHeight()
+        end
+
+        local centerX = cfg.ModelOffsetX + (CharacterModelFrame.bcpOrigW / 2)
+        local centerY = cfg.ModelOffsetY - (CharacterModelFrame.bcpOrigH / 2)
+
+        CharacterModelFrame:SetWidth(CharacterModelFrame.bcpOrigW * (cfg.ModelWidthFactor or 1))
+        CharacterModelFrame:SetHeight(CharacterModelFrame.bcpOrigH * (cfg.ModelHeightFactor or 1))
+
+        CharacterModelFrame:SetScale(scale)
+
+        -- Scaling the frame also grows the model by roughly scale^2 (viewport * model), which
+        -- crops the head. Cancel the extra factor so the model grows only as much as the viewport.
+        if CharacterModelFrame.SetModelScale then
+            CharacterModelFrame:SetModelScale(1 / scale)
+        end
+
+        CharacterModelFrame:SetPoint("CENTER", PaperDollFrame, "TOPLEFT", centerX / scale, centerY / scale)
+
+        -- Model above the paper doll (so it gets clicks) but below the item slots
+        BCP_LayerModelBehindSlots()
     end
 
     local fontScale = (BCPConfig and BCPConfig.StatPanel and BCPConfig.StatPanel.FontScale) or 1.0
@@ -292,7 +399,7 @@ function skin:OnPaperDollShow()
             scrollbar:SetPoint("TOPLEFT", scrollFrame, "TOPRIGHT", -20, -16)
             scrollbar:SetPoint("BOTTOMLEFT", scrollFrame, "BOTTOMRIGHT", -20, 16)
             scrollbar:SetMinMaxValues(0, 0)
-            scrollbar:SetValueStep(20)
+            scrollbar:SetValueStep(1)
             scrollbar:SetValue(0)
 
             pfUI.api.SkinScrollbar(scrollbar)
@@ -314,6 +421,7 @@ function skin:OnPaperDollShow()
         scrollFrame:SetScript("OnUpdate", function()
             scrollFrame:SetScript("OnUpdate", nil)
 
+            BCP_FitScrollBottom(cfg)
             local w = scrollFrame:GetWidth()
             contentFrame:SetWidth(w)
 
@@ -330,6 +438,7 @@ function skin:OnPaperDollShow()
         BCPPFUIStatsScrollFrame:ClearAllPoints()
         BCPPFUIStatsScrollFrame:SetPoint("TOPLEFT", BCPPFUICharacterInformationFrame, "TOPLEFT", 2, -cfg.ScrollTopPad)
         BCPPFUIStatsScrollFrame:SetPoint("BOTTOMRIGHT", BCPPFUICharacterInformationFrame, "BOTTOMRIGHT", 0, bottomPad)
+        BCP_FitScrollBottom(cfg)
     end
 
     if BCPPFUIStatsScrollFrame and CharacterResistanceFrame and not BCPPFUIResistanceAnchored then
@@ -340,6 +449,8 @@ function skin:OnPaperDollShow()
     if CharacterResistanceFrame then
         CharacterResistanceFrame:Show()
     end
+
+    BCP_AnchorOutfitter(cfg)
 end
 
 -- ======================================
