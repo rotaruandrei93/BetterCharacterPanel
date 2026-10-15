@@ -293,6 +293,59 @@ SlashCmdList["BCPALIGN"] = function(msg)
     say("nudges now: top " .. (align.Top or 0) .. ", bottom " .. (align.Bottom or 0))
 end
 
+-- Model viewport size/position. Split out so /bcpmodel can re-apply it live.
+local BCP_ModelCfg
+
+function BCP_ApplyModelLayout(cfg)
+    BCP_ModelCfg = cfg
+
+    if not (CharacterModelFrame and PaperDollFrame) then
+        return
+    end
+
+    CharacterModelFrame:ClearAllPoints()
+
+    -- Enlarge the model's viewport and the model together (no cropping), keeping the
+    -- frame's centre where the unscaled frame's centre would be.
+    local scale = cfg.ModelScale or 1
+
+    if not CharacterModelFrame.bcpOrigW then
+        CharacterModelFrame.bcpOrigW = CharacterModelFrame:GetWidth()
+        CharacterModelFrame.bcpOrigH = CharacterModelFrame:GetHeight()
+    end
+
+    local centerX = cfg.ModelOffsetX + (CharacterModelFrame.bcpOrigW / 2)
+    local centerY = cfg.ModelOffsetY - (CharacterModelFrame.bcpOrigH / 2)
+
+    CharacterModelFrame:SetWidth(CharacterModelFrame.bcpOrigW * (cfg.ModelWidthFactor or 1))
+    CharacterModelFrame:SetHeight(CharacterModelFrame.bcpOrigH * (cfg.ModelHeightFactor or 1))
+    CharacterModelFrame:SetScale(scale)
+
+    -- Scaling the frame also grows the model by roughly scale^2; cancel the extra factor.
+    if CharacterModelFrame.SetModelScale then
+        CharacterModelFrame:SetModelScale(1 / scale)
+    end
+
+    CharacterModelFrame:SetPoint("CENTER", PaperDollFrame, "TOPLEFT", centerX / scale, centerY / scale)
+end
+
+-- /bcpmodel <scale> <widthFactor> <heightFactor>   e.g. /bcpmodel 1 1 1 (stock size, cheapest to draw)
+-- Live test, not saved. Bigger numbers = more pixels for the 3D model to draw each frame.
+SLASH_BCPMODEL1 = "/bcpmodel"
+SlashCmdList["BCPMODEL"] = function(msg)
+    local cfg = BCP_ModelCfg
+    local _, _, a, b, c = string.find(msg or "", "^%s*([%d%.]+)%s+([%d%.]+)%s+([%d%.]+)")
+
+    if cfg and a and tonumber(a) and tonumber(a) > 0 then
+        cfg.ModelScale, cfg.ModelWidthFactor, cfg.ModelHeightFactor = tonumber(a), tonumber(b), tonumber(c)
+        BCP_ApplyModelLayout(cfg)
+    end
+
+    if cfg then
+        DEFAULT_CHAT_FRAME:AddMessage("|cff66ccffBCP|r model: scale " .. (cfg.ModelScale or 1) .. ", width " .. (cfg.ModelWidthFactor or 1) .. ", height " .. (cfg.ModelHeightFactor or 1) .. "   (usage: /bcpmodel 1 1 1)")
+    end
+end
+
 -- ==============================
 -- =   Paper Doll Frame Hooks   =
 -- ==============================
@@ -305,28 +358,7 @@ function skin:OnPaperDollShow()
         BCPLib:EnableClickRotate(CharacterModelFrame)
         CharacterModelFrame:ClearAllPoints()
 
-        -- Enlarge the model's viewport and the model together (no cropping), keeping the
-        -- frame's centre where the unscaled frame's centre would be.
-        local scale = cfg.ModelScale or 1
-
-        if not CharacterModelFrame.bcpOrigW then
-            CharacterModelFrame.bcpOrigW = CharacterModelFrame:GetWidth()
-            CharacterModelFrame.bcpOrigH = CharacterModelFrame:GetHeight()
-        end
-
-        local centerX = cfg.ModelOffsetX + (CharacterModelFrame.bcpOrigW / 2)
-        local centerY = cfg.ModelOffsetY - (CharacterModelFrame.bcpOrigH / 2)
-
-        CharacterModelFrame:SetWidth(CharacterModelFrame.bcpOrigW * (cfg.ModelWidthFactor or 1))
-        CharacterModelFrame:SetHeight(CharacterModelFrame.bcpOrigH * (cfg.ModelHeightFactor or 1))
-        CharacterModelFrame:SetScale(scale)
-
-        -- Scaling the frame also grows the model by roughly scale^2; cancel the extra factor.
-        if CharacterModelFrame.SetModelScale then
-            CharacterModelFrame:SetModelScale(1 / scale)
-        end
-
-        CharacterModelFrame:SetPoint("CENTER", PaperDollFrame, "TOPLEFT", centerX / scale, centerY / scale)
+        BCP_ApplyModelLayout(cfg)
 
         -- Model above the paper doll (so it gets clicks) but below the item slots
         BCP_LayerModelBehindSlots()
