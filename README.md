@@ -9,7 +9,7 @@ An addon that improves the character panel and the inspect panel by displaying p
 - Enchant descriptions next to their corresponding gear icons both on your character panel and on the inspect panel.
 - A dynamic missing enchant icon on equipment slots that could be enchanted but aren't.
 - An improved character panel layout compatible with the default interface or with addons like pfUI.
-- Integrated compatibility with [Better Character Stats](https://github.com/pepopo978/BetterCharacterStats) for an even better character panel!
+- Integrated compatibility with [Better Character Stats](https://github.com/USS-Enterprise-Guild/BetterCharacterStats) for an even better character panel!
 - A configuration GUI, accessible through its associated minimap button or through the command `/bcp`, to enable, disable, and tweak every feature you can think of!
 
 ## Screenshots
@@ -26,8 +26,8 @@ An addon that improves the character panel and the inspect panel by displaying p
 
 ## Installation
 
-This addon **requires** [Nampower](https://gitea.com/avitasia/nampower). Make sure to download and install it beforehand.  
-It is also **strongly recommended** to install [Better Character Stats](https://github.com/pepopo978/BetterCharacterStats) to improve the character panel even further.
+This addon **requires** [Nampower](https://github.com/brues-code/nampower). Make sure to download and install it beforehand.  
+It is also **strongly recommended** to install [Better Character Stats](https://github.com/USS-Enterprise-Guild/BetterCharacterStats) to improve the character panel even further.
 
 ### Wuddle (**Recommended**)
   
@@ -37,28 +37,22 @@ It is also **strongly recommended** to install [Better Character Stats](https://
 
 ### Manual installation
 
-1. Download the [latest version](https://github.com/Arthur-Helias/BetterCharacterPanel/archive/refs/heads/master.zip) of the addon.
+1. Download the [latest version](https://github.com/rotaruandrei93/BetterCharacterPanel/archive/refs/heads/main.zip) of the addon.
 2. Extract the archive.
 3. Rename the folder from "BetterCharacterPanel-master" to "BetterCharacterPanel".
 4. Copy the renamed folder into `WoW-Directory\Interface\AddOns`.
 5. Enable the addon from the addons menu on the character selection screen.
 
-## Known Issues
-
-- pfUI's skinning is not applied to the dropdown and the checkmarks in the config GUI. There is issues with the frame level that I can't seem to resolve.
-
-Please report any issues you encounter through the `Issues` tab on this repository. Feel free to open a PR if you'd like to contribute!
-
 ## Compatibility
 
-This addon was designed and tested for TurtleWoW.
+This addon was designed and tested for Capycraft.
 This addon was designed and tested with the default interface and pfUI. The addon should remain somewhat functional with other interface addons, but the compatibility is not guaranteed.
 
 ## Addon Recommendations
 
 Here are a few other addons that improve other parts of the game and do not conflict with this addon:
 
-- [Better Character Stats](https://github.com/pepopo978/BetterCharacterStats) - Improved character statistics in your character panel.
+- [Better Character Stats](https://github.com/USS-Enterprise-Guild/BetterCharacterStats) - Improved character statistics in your character panel.
 - [pfUI-MoreDatatexts](https://github.com/Arthur-Helias/pfUI-MoreDatatexts) - A module for pfUI that adds extra datatexts.
 - [pfUI-LocationPlus](https://github.com/Arthur-Helias/pfUI-LocationPlus) - A module for pfUI that adds a location frame and two extra panels.
 - [ZonesLevel](https://github.com/Arthur-Helias/ZonesLevel) - Adds zones level range to your world map.
@@ -68,4 +62,4 @@ Here are a few other addons that improve other parts of the game and do not conf
 [Walter Bennet](https://github.com/Arthur-Helias) - Addon creation  
 [Repooc](https://github.com/Repooc) - ReforgedArmory, inspiration  
 [Shagu](https://github.com/shagu) - pfUI, ShaguScore, some code elements  
-[pepopo978](https://github.com/pepopo978) - Current maintainer of Better Character Stats
+[USS-Enterprise-Guild](https://github.com/USS-Enterprise-Guild) - Current maintainer of Better Character Stats
