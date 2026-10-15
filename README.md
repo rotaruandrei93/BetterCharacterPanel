@@ -2,7 +2,7 @@
 
 An addon that improves the character panel and the inspect panel by displaying permanent and temporary enchantments, and player stats!
 
-**REQUIRES [Nampower](https://gitea.com/avitasia/nampower)!**
+**REQUIRES [Nampower](https://github.com/brues-code/nampower)!**
 
 ## Features
 
