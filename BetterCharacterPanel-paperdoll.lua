@@ -389,7 +389,7 @@ function BCP_BuildScrollContent(skin, contentFrame, scrollFrame, scrollBar, bcsC
     local maxH = (scrollFrame and scrollFrame:GetHeight()) or 400
 
     if isWideMode then
-        maxH = maxH + 75
+        -- FIX: removed the extra +75 so cards wrap to the next column instead of overflowing the panel
     elseif BCP_IS_USING_BCS then
         local scrollbarWidth = (BCP_IS_USING_PFUI and 20) or 25
 
@@ -460,7 +460,10 @@ function BCP_BuildScrollContent(skin, contentFrame, scrollFrame, scrollBar, bcsC
             contentFrame:SetWidth(totalContentWidth)
 
             if infoFrame then
-                infoFrame:SetWidth(totalContentWidth + scrollPaddingX)
+                -- FIX (Vanilla skin): the scroll area sits 12px in from the left edge but only 5px in from the
+                -- right, so the right column ran into the border art. Add 7px so both sides match.
+                local wideRightExtra = (not BCP_IS_USING_PFUI) and 7 or 0
+                infoFrame:SetWidth(totalContentWidth + scrollPaddingX + wideRightExtra)
 
                 if BCP_IS_USING_PFUI and BCPPFUIUnifiedBackdrop and BCPPFUIUnifiedBackdrop.backdrop then
                     BCPPFUIUnifiedBackdrop.backdrop:SetPoint("BOTTOMRIGHT", -30 + infoFrame:GetWidth() + 5, 72)
@@ -470,7 +473,7 @@ function BCP_BuildScrollContent(skin, contentFrame, scrollFrame, scrollBar, bcsC
             contentFrame:SetHeight(maxH)
         else
             contentFrame:SetWidth(contentW)
-            contentFrame:SetHeight(yOffset - 45)
+            contentFrame:SetHeight(yOffset)
 
             if BCP_IS_USING_PFUI and BCPPFUIUnifiedBackdrop and BCPPFUIUnifiedBackdrop.backdrop and infoFrame then
                 BCPPFUIUnifiedBackdrop.backdrop:SetPoint("BOTTOMRIGHT", -30 + infoFrame:GetWidth() + 5, 72)
@@ -578,7 +581,7 @@ function BCP_BuildScrollContent(skin, contentFrame, scrollFrame, scrollBar, bcsC
             local contentH = contentFrame:GetHeight()
             local frameH = scrollFrame:GetHeight()
 
-            scrollBar:SetMinMaxValues(0, math.max(0, contentH - frameH - 20))
+            scrollBar:SetMinMaxValues(0, math.max(0, contentH - frameH))
             scrollBar:Show()
         end
     end
@@ -586,15 +589,96 @@ function BCP_BuildScrollContent(skin, contentFrame, scrollFrame, scrollBar, bcsC
     BCP_RefreshBCSSections(false)
 end
 
+-- FIX: keep the (enlarged) model frame above PaperDollFrame itself, so it still receives the
+-- mouse for click-rotating, but below the item slots, so it never blocks clicks on them.
+function BCP_LayerModelBehindSlots()
+    if not (PaperDollFrame and CharacterModelFrame) then
+        return
+    end
+
+    local base = PaperDollFrame:GetFrameLevel()
+    local slots = {
+        "Head", "Neck", "Shoulder", "Back", "Chest", "Shirt", "Tabard", "Wrist", "Hands", "Waist",
+        "Legs", "Feet", "Finger0", "Finger1", "Trinket0", "Trinket1", "MainHand", "SecondaryHand",
+        "Ranged", "Ammo",
+    }
+
+    CharacterModelFrame:SetFrameLevel(base + 1)
+
+    for _, slotName in ipairs(slots) do
+        local slot = getglobal("Character" .. slotName .. "Slot")
+
+        if slot then
+            slot:SetFrameLevel(base + 3)
+        end
+    end
+end
+
+-- FIX: the empty black panel under the model is a stock stats frame. Hide every candidate,
+-- including a skin backdrop, and re-hide it if another addon shows it again.
+local function BCP_HideStockStatPanels()
+    local names = { "CharacterAttributesFrame", "BetterCharacterAttributesFrame" }
+
+    -- The stray black panel is made of unnamed frames (about 221x77 and 227x82)
+    -- directly under PaperDollFrame, found with /bcpfind.
+    if PaperDollFrame then
+        for _, child in ipairs({ PaperDollFrame:GetChildren() }) do
+            local w, h = child:GetWidth(), child:GetHeight()
+
+            if not child:GetName() and w and h and w >= 215 and w <= 232 and h >= 72 and h <= 86 then
+                child:Hide()
+
+                if not child.bcpKeepHidden then
+                    child.bcpKeepHidden = true
+
+                    local origOnShow = child:GetScript("OnShow")
+
+                    child:SetScript("OnShow", function()
+                        if origOnShow then
+                            origOnShow()
+                        end
+
+                        this:Hide()
+                    end)
+                end
+            end
+        end
+    end
+
+    for _, name in ipairs(names) do
+        local f = getglobal(name)
+
+        if f then
+            f:Hide()
+
+            if f.backdrop then
+                f.backdrop:Hide()
+            end
+
+            if not f.bcpKeepHidden then
+                f.bcpKeepHidden = true
+
+                local origOnShow = f:GetScript("OnShow")
+
+                f:SetScript("OnShow", function()
+                    if origOnShow then
+                        origOnShow()
+                    end
+
+                    this:Hide()
+                end)
+            end
+        end
+    end
+end
+
 local function BCP_Refresh(unit, prefix)
     local skin = BCP_GetActiveSkin()
     BCP_Init(prefix, skin.FrameValues)
 
     if prefix == "BCP_" then
-        -- Hide character stats frame
-        if CharacterAttributesFrame then
-            CharacterAttributesFrame:Hide()
-        end
+        -- Hide the stock stats panels (and keep them hidden if something shows them again)
+        BCP_HideStockStatPanels()
     end
 
     for _, info in ipairs(BCP_SLOTS) do
@@ -830,4 +914,79 @@ function InspectPaperDollFrame_OnShow()
 
     BCP_GetActiveSkin():OnInspectShow()
     BCP_Refresh(BCP_GetInspectUnit(), "BCP_Inspect_")
+end
+
+-- ====================================
+-- =   /bcpfind  (panel finder)       =
+-- ====================================
+-- Lists visible frames/textures about the size of the stray black panel.
+-- "/bcpfind hide" also hides them until the next /reload.
+
+local function BCP_FindCandidate(obj)
+    local w, h = obj:GetWidth(), obj:GetHeight()
+
+    return w and h and w >= 150 and w <= 300 and h >= 40 and h <= 130
+end
+
+local function BCP_FindDescribe(obj, parent)
+    local name = obj:GetName() or "<anon>"
+    local pname = (parent and parent:GetName()) or "<anon>"
+    local extra = ""
+
+    if obj:GetObjectType() == "Texture" then
+        extra = " tex=" .. tostring(obj:GetTexture())
+    end
+
+    return string.format("%s [%s] in %s  %dx%d%s", name, obj:GetObjectType(), pname,
+        math.floor(obj:GetWidth() + 0.5), math.floor(obj:GetHeight() + 0.5), extra)
+end
+
+local function BCP_FindScan(frame, depth, hide, found)
+    if depth > 5 then
+        return
+    end
+
+    for _, region in ipairs({ frame:GetRegions() }) do
+        if region:IsShown() and BCP_FindCandidate(region) then
+            DEFAULT_CHAT_FRAME:AddMessage("|cff66ccffBCP|r " .. BCP_FindDescribe(region, frame))
+            found.n = found.n + 1
+
+            if hide then
+                region:Hide()
+            end
+        end
+    end
+
+    for _, child in ipairs({ frame:GetChildren() }) do
+        if child:IsShown() and BCP_FindCandidate(child) then
+            DEFAULT_CHAT_FRAME:AddMessage("|cff66ccffBCP|r " .. BCP_FindDescribe(child, frame))
+            found.n = found.n + 1
+
+            if hide then
+                child:Hide()
+            end
+        end
+
+        BCP_FindScan(child, depth + 1, hide, found)
+    end
+end
+
+SLASH_BCPFIND1 = "/bcpfind"
+SlashCmdList["BCPFIND"] = function(msg)
+    local hide = (msg == "hide")
+    local found = { n = 0 }
+
+    if not PaperDollFrame then
+        return
+    end
+
+    BCP_FindScan(PaperDollFrame, 0, hide, found)
+
+    if found.n == 0 then
+        DEFAULT_CHAT_FRAME:AddMessage("|cff66ccffBCP|r nothing of that size found. Open the Character tab first.")
+    elseif hide then
+        DEFAULT_CHAT_FRAME:AddMessage("|cff66ccffBCP|r hid " .. found.n .. " object(s). /reload undoes it.")
+    else
+        DEFAULT_CHAT_FRAME:AddMessage("|cff66ccffBCP|r " .. found.n .. " found. Type /bcpfind hide to hide them.")
+    end
 end
