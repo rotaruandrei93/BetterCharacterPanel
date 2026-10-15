@@ -1,8 +1,8 @@
 ## Interface: 11200
 ## Title: Better Character Panel
-## Version: 1.3.6
+## Version: 1.3.7
 ## SavedVariablesPerCharacter: BCPConfig
-## Author: Walter Bennet
+## Author: Walter Bennet, rotaruandrei93
 ## Notes: Improves the default character and inspect panel!
 ## X-URL: https://github.com/Arthur-Helias/BetterCharacterPanel
 
