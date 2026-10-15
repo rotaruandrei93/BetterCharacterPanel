@@ -59,13 +59,25 @@ skin.FrameValues = {
 skin.Config = {
     -- Character model position
     ModelOffsetX = 65,
-    ModelOffsetY = -120,
+    ModelOffsetY = -160, -- stock was -120; more negative = lower
+    -- Character model size (1.0 = stock). The model's viewport is scaled by this and the model
+    -- itself is scaled back by 1/this, so the model is this much bigger but never cropped.
+    ModelScale = 1.25,
+    -- Extra viewport width / height (1.0 = stock). Raise if the model gets cropped at the sides / top.
+    ModelWidthFactor = 1.2,
+    ModelHeightFactor = 1.4,
+
+    -- Outfitter window position, relative to the top-right corner of the stats panel
+    OutfitterOffsetX = -5,
+    OutfitterOffsetY = -5,
 
     -- BCP added information panel
     InfoFrameXOffset = 357,
-    InfoFrameYOffset = 31,
+    -- Panel edges relative to PaperDollFrame: Top = units ABOVE its top edge, Bottom = units ABOVE its
+    -- bottom edge. Fine-tune in game with /bcpalign (saved per character).
+    InfoFrameTop = -10,
     InfoFrameWidth = 170,
-    InfoFrameHeightPadding = 40,
+    InfoFrameBottom = 70,
 
     -- Resistance icons
     ResistanceItemWidth = 20,
@@ -153,11 +165,132 @@ local function BCP_AnchorResistanceFrame(infoFrame, aboveSection, cfg)
     for _, child in ipairs({ CharacterResistanceFrame:GetChildren() }) do
         child:ClearAllPoints()
         child:SetPoint("TOPLEFT", CharacterResistanceFrame, "TOPLEFT", xOffset, 0)
+
+        -- FIX: center the resistance number inside its icon
+        for _, region in ipairs({ child:GetRegions() }) do
+            if region:GetObjectType() == "FontString" then
+                region:ClearAllPoints()
+                region:SetPoint("CENTER", child, "CENTER", 0, 0)
+                region:SetDrawLayer("OVERLAY")
+            end
+        end
         xOffset = xOffset + cfg.ResistanceItemWidth + cfg.ResistanceItemSpacing
     end
 
     CharacterResistanceFrame:SetWidth(xOffset)
     CharacterResistanceFrame:SetHeight(cfg.ResistanceFrameHeight)
+
+    -- FIX: draw above the panel and cards
+    CharacterResistanceFrame:SetFrameStrata("HIGH")
+end
+
+-- FIX: Outfitter anchors itself to the stock character frame, which is narrower than the stats
+-- panel, so it opens on top of it. Anchor it to the right edge of the stats panel instead.
+local BCP_OutfitCfg
+
+local function BCP_AnchorOutfitter(cfg)
+    local info = BCPVanillaCharacterInformationFrame
+
+    BCP_OutfitCfg = cfg
+
+    if not (OutfitterFrame and info) then
+        return
+    end
+
+    OutfitterFrame:ClearAllPoints()
+    OutfitterFrame:SetPoint("TOPLEFT", info, "TOPRIGHT", cfg.OutfitterOffsetX or 0, cfg.OutfitterOffsetY or 0)
+
+    if not OutfitterFrame.bcpHooked then
+        OutfitterFrame.bcpHooked = true
+
+        local origOnShow = OutfitterFrame:GetScript("OnShow")
+
+        OutfitterFrame:SetScript("OnShow", function()
+            if origOnShow then
+                origOnShow()
+            end
+
+            BCP_AnchorOutfitter(cfg)
+        end)
+    end
+end
+
+-- /bcpoutfit x <n> | y <n> : move the Outfitter window live (x > 0 right, y > 0 up). Not saved;
+-- tell the number to whoever maintains the file to make it the default.
+SLASH_BCPOUTFIT1 = "/bcpoutfit"
+SlashCmdList["BCPOUTFIT"] = function(msg)
+    local cfg = BCP_OutfitCfg
+    local _, _, which, amount = string.find(msg or "", "^(%a+)%s*(-?[%d%.]*)")
+
+    if cfg and (which == "x" or which == "y") and tonumber(amount) then
+        if which == "x" then
+            cfg.OutfitterOffsetX = tonumber(amount)
+        else
+            cfg.OutfitterOffsetY = tonumber(amount)
+        end
+        BCP_AnchorOutfitter(cfg)
+    end
+
+    if cfg then
+        DEFAULT_CHAT_FRAME:AddMessage("|cff66ccffBCP|r Outfitter offset: x " .. (cfg.OutfitterOffsetX or 0) .. ", y " .. (cfg.OutfitterOffsetY or 0) .. "   (usage: /bcpoutfit x -10, /bcpoutfit y 0)")
+    end
+end
+
+-- Anchor the stats panel's top and bottom edges independently to PaperDollFrame, so they can be
+-- lined up with the window. BCPConfig.InfoAlign holds the user's nudges from /bcpalign.
+local BCP_InfoCfg
+
+local function BCP_ApplyInfoFrameAnchors(cfg)
+    local info = BCPVanillaCharacterInformationFrame
+
+    if cfg then
+        BCP_InfoCfg = cfg
+    end
+
+    cfg = BCP_InfoCfg
+
+    if not (info and PaperDollFrame and cfg) then
+        return
+    end
+
+    local align = (BCPConfig and BCPConfig.InfoAlign) or { Top = 0, Bottom = 0 }
+    local top = cfg.InfoFrameTop + (align.Top or 0)
+    local bottom = cfg.InfoFrameBottom - (align.Bottom or 0)
+
+    info:ClearAllPoints()
+    info:SetPoint("TOPLEFT", PaperDollFrame, "TOPLEFT", cfg.InfoFrameXOffset, top)
+    info:SetPoint("BOTTOMLEFT", PaperDollFrame, "BOTTOMLEFT", cfg.InfoFrameXOffset, bottom)
+end
+
+SLASH_BCPALIGN1 = "/bcpalign"
+SlashCmdList["BCPALIGN"] = function(msg)
+    local say = function(text)
+        DEFAULT_CHAT_FRAME:AddMessage("|cff66ccffBCP|r " .. text)
+    end
+
+    if not BCPConfig then
+        return
+    end
+
+    BCPConfig.InfoAlign = BCPConfig.InfoAlign or { Top = 0, Bottom = 0 }
+
+    local align = BCPConfig.InfoAlign
+    local _, _, which, amount = string.find(msg or "", "^(%a+)%s*(-?[%d%.]*)")
+
+    if which == "reset" then
+        align.Top, align.Bottom = 0, 0
+    elseif (which == "top" or which == "bottom") and tonumber(amount) then
+        local key = (which == "top") and "Top" or "Bottom"
+
+        align[key] = (align[key] or 0) + tonumber(amount)
+    else
+        say("/bcpalign top <n>    move the panel's TOP edge up (n>0) or down (n<0)")
+        say("/bcpalign bottom <n> move the panel's BOTTOM edge down (n>0) or up (n<0)")
+        say("/bcpalign reset      undo all nudges. One unit is about 1 pixel; repeat to keep nudging.")
+    end
+
+    BCP_ApplyInfoFrameAnchors()
+    say("nudges now: top " .. (align.Top or 0) .. ", bottom " .. (align.Bottom or 0))
 end
 
 -- ==============================
@@ -171,7 +304,32 @@ function skin:OnPaperDollShow()
     if CharacterModelFrame then
         BCPLib:EnableClickRotate(CharacterModelFrame)
         CharacterModelFrame:ClearAllPoints()
-        CharacterModelFrame:SetPoint("TOPLEFT", PaperDollFrame, "TOPLEFT", cfg.ModelOffsetX, cfg.ModelOffsetY)
+
+        -- Enlarge the model's viewport and the model together (no cropping), keeping the
+        -- frame's centre where the unscaled frame's centre would be.
+        local scale = cfg.ModelScale or 1
+
+        if not CharacterModelFrame.bcpOrigW then
+            CharacterModelFrame.bcpOrigW = CharacterModelFrame:GetWidth()
+            CharacterModelFrame.bcpOrigH = CharacterModelFrame:GetHeight()
+        end
+
+        local centerX = cfg.ModelOffsetX + (CharacterModelFrame.bcpOrigW / 2)
+        local centerY = cfg.ModelOffsetY - (CharacterModelFrame.bcpOrigH / 2)
+
+        CharacterModelFrame:SetWidth(CharacterModelFrame.bcpOrigW * (cfg.ModelWidthFactor or 1))
+        CharacterModelFrame:SetHeight(CharacterModelFrame.bcpOrigH * (cfg.ModelHeightFactor or 1))
+        CharacterModelFrame:SetScale(scale)
+
+        -- Scaling the frame also grows the model by roughly scale^2; cancel the extra factor.
+        if CharacterModelFrame.SetModelScale then
+            CharacterModelFrame:SetModelScale(1 / scale)
+        end
+
+        CharacterModelFrame:SetPoint("CENTER", PaperDollFrame, "TOPLEFT", centerX / scale, centerY / scale)
+
+        -- Model above the paper doll (so it gets clicks) but below the item slots
+        BCP_LayerModelBehindSlots()
     end
 
     local fontScale = (BCPConfig and BCPConfig.StatPanel and BCPConfig.StatPanel.FontScale) or 1.0
@@ -188,8 +346,6 @@ function skin:OnPaperDollShow()
 
         if not BCPVanillaCharacterInformationFrame then
             local infoFrame = CreateFrame("Frame", "BCPVanillaCharacterInformationFrame", PaperDollFrame)
-            infoFrame:SetPoint("LEFT", cfg.InfoFrameXOffset, cfg.InfoFrameYOffset)
-            infoFrame:SetHeight(PaperDollFrame:GetHeight() - cfg.InfoFrameHeightPadding)
             infoFrame:SetBackdrop({
                 bgFile = cfg.BackdropBgFile,
                 tile = true,
@@ -204,6 +360,8 @@ function skin:OnPaperDollShow()
         if not (isWideMode and BCPVanillaStatsContent and BCPVanillaStatsContent.bcpContentBuilt) then
             BCPVanillaCharacterInformationFrame:SetWidth(scaledInfoWidth)
         end
+
+        BCP_ApplyInfoFrameAnchors(cfg)
     end
 
     if not BCPVanillaStatsScrollFrame and BCPVanillaCharacterInformationFrame and CharacterResistanceFrame then
@@ -219,7 +377,7 @@ function skin:OnPaperDollShow()
             scrollbar:SetPoint("TOPLEFT", scrollFrame, "TOPRIGHT", -25, -16)
             scrollbar:SetPoint("BOTTOMLEFT", scrollFrame, "BOTTOMRIGHT", -25, 16)
             scrollbar:SetMinMaxValues(0, 0)
-            scrollbar:SetValueStep(20)
+            scrollbar:SetValueStep(1)
             scrollbar:SetValue(0)
 
             scrollbar:SetScript("OnValueChanged", function()
@@ -252,8 +410,8 @@ function skin:OnPaperDollShow()
         BCPVanillaStatsScrollFrame:ClearAllPoints()
         BCPVanillaStatsScrollFrame:SetPoint("TOPLEFT", BCPVanillaCharacterInformationFrame, "TOPLEFT", 12,
             -cfg.ScrollTopPad)
-        BCPVanillaStatsScrollFrame:SetPoint("BOTTOMRIGHT", BCPVanillaCharacterInformationFrame, "BOTTOMRIGHT", -5,
-            bottomPad)
+        BCPVanillaStatsScrollFrame:SetPoint("BOTTOMRIGHT", BCPVanillaCharacterInformationFrame, "BOTTOMRIGHT",
+            isWideMode and -12 or -5, bottomPad)
     end
 
     if BCPVanillaStatsScrollFrame and CharacterResistanceFrame and not BCPVanillaResistanceAnchored then
@@ -264,6 +422,8 @@ function skin:OnPaperDollShow()
     if CharacterResistanceFrame then
         CharacterResistanceFrame:Show()
     end
+
+    BCP_AnchorOutfitter(cfg)
 end
 
 -- ======================================
