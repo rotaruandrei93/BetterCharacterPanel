@@ -679,7 +679,10 @@ local function BCP_HideStockStatPanels()
     end
 end
 
+BCP_RefreshCount = {}
+
 local function BCP_Refresh(unit, prefix)
+    BCP_RefreshCount[prefix] = (BCP_RefreshCount[prefix] or 0) + 1
     local skin = BCP_GetActiveSkin()
     BCP_Init(prefix, skin.FrameValues)
 
@@ -862,10 +865,10 @@ function PaperDollFrame_OnEvent(event, arg1)
     end
 
     if event == "UNIT_INVENTORY_CHANGED" then
-        if InspectFrame and InspectFrame.unit and arg1 == InspectFrame.unit then
-            if InspectPaperDollFrame:IsVisible() then
-                BCP_Refresh(InspectFrame.unit, "BCP_Inspect_")
-            end
+        local inspectUnit = (InspectFrame and InspectFrame.unit and InspectFrame.unit ~= "" and InspectFrame.unit) or "target"
+
+        if arg1 == inspectUnit and InspectPaperDollFrame and InspectPaperDollFrame:IsVisible() then
+            BCP_Refresh(inspectUnit, "BCP_Inspect_")
         end
 
         if arg1 == "player" and PaperDollFrame:IsVisible() then
@@ -945,13 +948,67 @@ local function BCP_GetInspectUnit()
     return "target"
 end
 
-local _Orig_InspectPaperDollFrame_OnShow = InspectPaperDollFrame_OnShow
+function BCP_ClearInspectTexts()
+    for _, info in ipairs(BCP_SLOTS) do
+        local permFS = getglobal("BCP_Inspect_" .. info.tag .. "_Perm")
+        local tempFS = getglobal("BCP_Inspect_" .. info.tag .. "_Temp")
+        local missingTex = getglobal("BCP_Inspect_" .. info.tag .. "_MissingEnchant")
 
-function InspectPaperDollFrame_OnShow()
-    if _Orig_InspectPaperDollFrame_OnShow then
-        _Orig_InspectPaperDollFrame_OnShow()
+        if permFS then permFS:SetText("") end
+        if tempFS then tempFS:SetText("") end
+        if missingTex then missingTex:Hide() end
+    end
+end
+
+-- The other player's gear data can arrive a moment after the window opens, so refresh a few more times.
+local BCP_InspectRetryFrame = CreateFrame("Frame")
+local BCP_InspectRetryElapsed, BCP_InspectRetryStep = 0, 1
+local BCP_InspectRetryTimes = { 0.4, 1.0, 2.0, 3.5 }
+
+local function BCP_InspectRetryOnUpdate()
+    BCP_InspectRetryElapsed = BCP_InspectRetryElapsed + arg1
+
+    if BCP_InspectRetryElapsed < BCP_InspectRetryTimes[BCP_InspectRetryStep] then
+        return
     end
 
+    BCP_InspectRetryStep = BCP_InspectRetryStep + 1
+
+    if InspectPaperDollFrame and InspectPaperDollFrame:IsVisible() then
+        BCP_Refresh(BCP_GetInspectUnit(), "BCP_Inspect_")
+    end
+
+    if BCP_InspectRetryStep > table.getn(BCP_InspectRetryTimes) or not (InspectPaperDollFrame and InspectPaperDollFrame:IsVisible()) then
+        BCP_InspectRetryFrame:SetScript("OnUpdate", nil)
+    end
+end
+
+function BCP_StartInspectRetry()
+    BCP_InspectRetryElapsed, BCP_InspectRetryStep = 0, 1
+    BCP_InspectRetryFrame:SetScript("OnUpdate", BCP_InspectRetryOnUpdate)
+end
+
+-- Draw the enchant texts above the inspect window's background (pfUI draws that as a child frame, which
+-- otherwise dims the text).
+local function BCP_FixInspectLayer()
+    if not (BCP_Inspect and InspectPaperDollFrame) then
+        return
+    end
+
+    local top = InspectPaperDollFrame
+    local topLevel = top:GetFrameLevel()
+
+    if InspectFrame then
+        BCP_Inspect:SetFrameStrata(InspectFrame:GetFrameStrata())
+        topLevel = math.max(topLevel, InspectFrame:GetFrameLevel())
+    else
+        BCP_Inspect:SetFrameStrata(top:GetFrameStrata())
+    end
+
+    BCP_Inspect:SetFrameLevel(topLevel + 20)
+end
+
+local function BCP_InspectShowBody()
     if InspectModelRotateLeftButton then
         InspectModelRotateLeftButton:Hide()
     end
@@ -961,8 +1018,89 @@ function InspectPaperDollFrame_OnShow()
     end
 
     BCP_GetActiveSkin():OnInspectShow()
+    BCP_FixInspectLayer()
+    BCP_ClearInspectTexts()
     BCP_Refresh(BCP_GetInspectUnit(), "BCP_Inspect_")
+    BCP_StartInspectRetry()
 end
+
+-- Never leave the inspected player's enchant texts / red "missing enchant" bars behind.
+local function BCP_HookInspectHide(frame)
+    if not frame or frame.bcpHideHooked then
+        return
+    end
+
+    frame.bcpHideHooked = true
+    local origOnHide = frame:GetScript("OnHide")
+
+    frame:SetScript("OnHide", function()
+        if origOnHide then
+            origOnHide()
+        end
+
+        BCP_ClearInspectTexts()
+    end)
+end
+
+-- The inspect window can be created after this file loads (load-on-demand or another addon), and our own
+-- BCP_Inspect frame (from the XML) is created after this file too. So the hooks are installed lazily, and
+-- again after every addon load, until everything is in place. Safe to call any number of times.
+local BCP_InspectShowFn
+
+function BCP_InstallInspectHooks()
+    -- 1. Wrap the game's InspectPaperDollFrame_OnShow, even if it was (re)defined after we loaded.
+    if InspectPaperDollFrame_OnShow and InspectPaperDollFrame_OnShow ~= BCP_InspectShowFn then
+        local orig = InspectPaperDollFrame_OnShow
+
+        BCP_InspectShowFn = function()
+            orig()
+            BCP_InspectShowBody()
+        end
+
+        InspectPaperDollFrame_OnShow = BCP_InspectShowFn
+    end
+
+    -- 2. Our enchant texts must live inside the inspect window, so they hide and show with it.
+    if BCP_Inspect and InspectPaperDollFrame and BCP_Inspect:GetParent() ~= InspectPaperDollFrame then
+        BCP_Inspect:SetParent(InspectPaperDollFrame)
+        BCP_Inspect:ClearAllPoints()
+        BCP_Inspect:SetAllPoints(InspectPaperDollFrame)
+    end
+
+    BCP_FixInspectLayer()
+
+    BCP_HookInspectHide(InspectFrame)
+    BCP_HookInspectHide(InspectPaperDollFrame)
+
+    -- 3. Some inspect windows never call InspectPaperDollFrame_OnShow: refresh when our own frame is shown.
+    if BCP_Inspect and not BCP_Inspect.bcpShowHooked then
+        BCP_Inspect.bcpShowHooked = true
+        local origShow = BCP_Inspect:GetScript("OnShow")
+
+        BCP_Inspect:SetScript("OnShow", function()
+            if origShow then
+                origShow()
+            end
+
+            BCP_FixInspectLayer()
+            BCP_ClearInspectTexts()
+            BCP_Refresh(BCP_GetInspectUnit(), "BCP_Inspect_")
+            BCP_StartInspectRetry()
+        end)
+    end
+
+    BCP_InspectHooksReady = (BCP_Inspect and BCP_Inspect.bcpShowHooked and BCP_InspectShowFn) and true or false
+end
+
+local BCP_InspectHookFrame = CreateFrame("Frame")
+BCP_InspectHookFrame:RegisterEvent("ADDON_LOADED")
+BCP_InspectHookFrame:RegisterEvent("PLAYER_ENTERING_WORLD")
+BCP_InspectHookFrame:RegisterEvent("PLAYER_TARGET_CHANGED")
+BCP_InspectHookFrame:SetScript("OnEvent", function()
+    BCP_InstallInspectHooks()
+end)
+
+BCP_InstallInspectHooks()
 
 -- ====================================
 -- =   /bcpfind  (panel finder)       =
@@ -1036,5 +1174,54 @@ SlashCmdList["BCPFIND"] = function(msg)
         DEFAULT_CHAT_FRAME:AddMessage("|cff66ccffBCP|r hid " .. found.n .. " object(s). /reload undoes it.")
     else
         DEFAULT_CHAT_FRAME:AddMessage("|cff66ccffBCP|r " .. found.n .. " found. Type /bcpfind hide to hide them.")
+    end
+end
+
+
+-- ====================================
+-- =   /bcpinspect  (inspect check)   =
+-- ====================================
+-- Open someone's inspect window, wait a few seconds, then type /bcpinspect and send me the lines it prints.
+SLASH_BCPINSPECT1 = "/bcpinspect"
+SlashCmdList["BCPINSPECT"] = function()
+    local function say(t) DEFAULT_CHAT_FRAME:AddMessage("|cff66ccffBCPi|r " .. t) end
+    local function vis(f) if not f then return "nil" end return (f:IsVisible() and "visible" or (f:IsShown() and "shown-but-hidden-parent" or "hidden")) end
+
+    local unit = BCP_GetInspectUnit()
+    say("file version: inspect-fix-4   hooks: showHooked=" .. tostring(BCP_Inspect and BCP_Inspect.bcpShowHooked) .. " hideHooked=" .. tostring(InspectFrame and InspectFrame.bcpHideHooked) .. " installed=" .. tostring(BCP_InspectHooksReady) .. " BCP_Inspect parent=" .. tostring(BCP_Inspect and BCP_Inspect:GetParent() and BCP_Inspect:GetParent():GetName()) .. "   refresh runs so far: player=" .. tostring(BCP_RefreshCount["BCP_"]) .. " inspect=" .. tostring(BCP_RefreshCount["BCP_Inspect_"]))
+
+    local ok, err = pcall(BCP_Refresh, unit, "BCP_Inspect_")
+    say("forced refresh: " .. (ok and "ran without error" or ("ERROR: " .. tostring(err))))
+
+    say("unit=" .. tostring(unit) .. "  InspectFrame " .. vis(InspectFrame) .. "  InspectPaperDollFrame " .. vis(InspectPaperDollFrame) .. "  BCP_Inspect " .. vis(BCP_Inspect))
+    say("ShowOnInspect perm=" .. tostring(BCPConfig and BCPConfig.PermanentEnchants and BCPConfig.PermanentEnchants.ShowOnInspect) .. " temp=" .. tostring(BCPConfig and BCPConfig.TemporaryEnchants and BCPConfig.TemporaryEnchants.ShowOnInspect))
+
+    local shown, withLink, withText = 0, 0, 0
+    local firstEnchantLine
+
+    for _, info in ipairs(BCP_SLOTS) do
+        local link = GetInventoryItemLink(unit, info.slotId)
+        local fs = getglobal("BCP_Inspect_" .. info.tag .. "_Perm")
+        local txt = fs and fs:GetText()
+
+        if link then withLink = withLink + 1 end
+        if txt and txt ~= "" then withText = withText + 1 end
+        if fs and fs:IsVisible() then shown = shown + 1 end
+
+        if link and not firstEnchantLine then
+            local perm = GetEnchantTexts(unit, info.slotId, info.libSlot)
+            firstEnchantLine = info.tag .. ": link " .. tostring(string.gsub(link, "|", "!")) .. "  ->  enchant text '" .. tostring(perm) .. "'"
+        end
+    end
+
+    say("slots with item link: " .. withLink .. " / " .. table.getn(BCP_SLOTS) .. ",  enchant texts set: " .. withText .. ",  texts visible: " .. shown)
+    if firstEnchantLine then say(firstEnchantLine) end
+
+    local legs = getglobal("BCP_Inspect_Legs_Perm")
+    if legs then
+        local p, rel, relp, x, y = legs:GetPoint()
+        say("Legs text: '" .. tostring(legs:GetText()) .. "' anchored to " .. tostring(rel and rel:GetName()) .. " alpha " .. tostring(legs:GetAlpha()) .. " parent " .. tostring(legs:GetParent() and legs:GetParent():GetName()))
+    else
+        say("BCP_Inspect_Legs_Perm does not exist")
     end
 end
