@@ -729,9 +729,23 @@ end
 -- character window, one on each side of the name: "Enable none" above the Head slot (top of the left slot
 -- column) and "Enable all" above the Hands slot (top of the right slot column).
 -- Nothing is searched: only these global names are used. Adjust live with:
---   /bcpbtn <x> <y>       x = how far each button moves inwards (the right one mirrors it), y = height above the slot
+--   /bcpbtn <x> <y> [xRight]  x = how far the left button moves right, xRight = how far the right one moves left
+--                         (default: same as x), y = height above the slot. Each skin has its own default.
 --   /bcpbtn               (status)    /bcpbtn off | on   (leave Outfitter's own position / use ours)    /bcpbtn debug
 local BCP_OUTFITTER_BTN_DEFAULT = { X = 0, Y = 38 }
+
+-- Saved /bcpbtn values win; otherwise the active skin's own default (skin.Config.OutfitterButtons); otherwise ours.
+local function BCP_OutfitterBtnCfg()
+    local saved = BCPConfig and BCPConfig.OutfitterTop
+
+    if saved and saved.X then
+        return saved
+    end
+
+    local skin = BCP_GetActiveSkin()
+
+    return (skin and skin.Config and skin.Config.OutfitterButtons) or BCP_OUTFITTER_BTN_DEFAULT
+end
 
 local function BCP_OutfitterBtnWanted()
     local cfg = BCPConfig and BCPConfig.OutfitterTop
@@ -749,15 +763,26 @@ function BCP_PlaceOutfitterButtons()
         return
     end
 
-    local c = (BCPConfig and BCPConfig.OutfitterTop) or BCP_OUTFITTER_BTN_DEFAULT
+    local c = BCP_OutfitterBtnCfg()
+    local xLeft = c.X or 0
+    local xRight = c.XR or xLeft
+    local y = c.Y or 38
 
     BCP_BtnPlaceCount = (BCP_BtnPlaceCount or 0) + 1
 
+    -- Optional per-skin button size (skin.Config.OutfitterButtons.W / .H), for tight headers.
+    if c.W and c.H then
+        left:SetWidth(c.W)
+        left:SetHeight(c.H)
+        right:SetWidth(c.W)
+        right:SetHeight(c.H)
+    end
+
     left:ClearAllPoints()
-    left:SetPoint("BOTTOMLEFT", leftSlot, "TOPLEFT", c.X or 0, c.Y or 38)
+    left:SetPoint("BOTTOMLEFT", leftSlot, "TOPLEFT", xLeft, y)
 
     right:ClearAllPoints()
-    right:SetPoint("BOTTOMRIGHT", rightSlot, "TOPRIGHT", -(c.X or 0), c.Y or 38)
+    right:SetPoint("BOTTOMRIGHT", rightSlot, "TOPRIGHT", -xRight, y)
 
     -- Outfitter may place them again when these windows open, so place them again right after.
     local frames = { OutfitterFrame, OutfitterSlotEnables }
@@ -807,9 +832,11 @@ SlashCmdList["BCPBTN"] = function(msg)
         return
     end
 
-    local _, _, x, y = string.find(msg, "^%s*(-?[%d%.]+)%s+(-?[%d%.]+)")
+    local _, _, x, y, xr = string.find(msg, "^%s*(-?[%d%.]+)%s+(-?[%d%.]+)%s*(-?[%d%.]*)")
 
-    if msg == "off" then
+    if msg == "reset" then
+        BCPConfig.OutfitterTop = nil
+    elseif msg == "off" then
         BCPConfig.OutfitterTop = BCPConfig.OutfitterTop or {}
         BCPConfig.OutfitterTop.Off = true
     elseif msg == "on" then
@@ -817,7 +844,7 @@ SlashCmdList["BCPBTN"] = function(msg)
         BCPConfig.OutfitterTop.Off = nil
     elseif msg == "debug" then
         DEFAULT_CHAT_FRAME:AddMessage("|cff66ccffBCP|r placement calls so far: " .. tostring(BCP_BtnPlaceCount or 0) ..
-            "  file version: btn-v9")
+            "  file version: btn-v11")
 
         local l = getglobal("OutfitterEnableAll")
         local r = getglobal("OutfitterEnableNone")
@@ -832,19 +859,19 @@ SlashCmdList["BCPBTN"] = function(msg)
             end
         end
     elseif tonumber(x) and tonumber(y) then
-        BCPConfig.OutfitterTop = { X = tonumber(x), Y = tonumber(y) }
+        BCPConfig.OutfitterTop = { X = tonumber(x), Y = tonumber(y), XR = tonumber(xr) }
     end
 
     BCP_PlaceOutfitterButtons()
 
-    local c = BCPConfig.OutfitterTop or BCP_OUTFITTER_BTN_DEFAULT
+    local c = BCP_OutfitterBtnCfg()
 
     DEFAULT_CHAT_FRAME:AddMessage("|cff66ccffBCP|r Outfitter buttons: found=" ..
         tostring((getglobal("OutfitterEnableAll") and getglobal("OutfitterEnableNone")) and true or false) ..
         " slots=" .. tostring((getglobal("CharacterHeadSlot") and getglobal("CharacterHandsSlot")) and true or false) ..
         " active=" .. tostring(BCP_OutfitterBtnWanted()) ..
-        "  x " .. (c.X or 0) .. ", y " .. (c.Y or 38) ..
-        "   (usage: /bcpbtn 0 38 | off | on | debug)")
+        "  x " .. (c.X or 0) .. ", xRight " .. (c.XR or c.X or 0) .. ", y " .. (c.Y or 38) ..
+        "   (usage: /bcpbtn <x> <y> [xRight] | reset | off | on | debug)")
 end
 
 BCP_RefreshCount = {}
