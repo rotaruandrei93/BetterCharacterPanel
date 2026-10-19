@@ -1,3 +1,47 @@
+-- Re-parent a stock Blizzard frame, remembering its original parent so it can be put back before the UI
+-- is torn down (/reload, logout). Stock frames still parented to addon-created frames at that point can
+-- crash the 1.12 client.
+BCP_ReparentedFrames = BCP_ReparentedFrames or {}
+
+function BCP_Reparent(frame, newParent)
+    if not frame then
+        return
+    end
+
+    if not frame.bcpOrigParent then
+        frame.bcpOrigParent = frame:GetParent()
+        table.insert(BCP_ReparentedFrames, frame)
+    end
+
+    frame:SetParent(newParent)
+end
+
+-- SetFont only when the font actually changed. Calling it again with the same values on every refresh makes
+-- the client look up / rebuild font textures needlessly, which stresses the renderer.
+function BCP_SetFontOnce(fs, path, size, flags)
+    -- Whole pixel sizes only: every distinct size builds its own font texture.
+    if type(size) == "number" then
+        size = math.floor(size + 0.5)
+    end
+
+    local key = tostring(path) .. "|" .. tostring(size) .. "|" .. tostring(flags)
+
+    if fs.bcpFontKey ~= key then
+        fs.bcpFontKey = key
+        fs:SetFont(path, size, flags)
+    end
+end
+
+local BCP_LogoutFrame = CreateFrame("Frame")
+BCP_LogoutFrame:RegisterEvent("PLAYER_LOGOUT")
+BCP_LogoutFrame:SetScript("OnEvent", function()
+    for _, f in ipairs(BCP_ReparentedFrames) do
+        if f.bcpOrigParent then
+            f:SetParent(f.bcpOrigParent)
+        end
+    end
+end)
+
 local BS = BCPDBEnchants.Slot
 
 BCP_SLOTS = {
@@ -159,14 +203,14 @@ local function BCP_Init(prefix, frameValues)
             if permFS then
                 local fontPath, fontSize, fontFlags = permFS:GetFont()
                 if fontPath and fontSize then
-                    permFS:SetFont(fontPath, fontSize * fontScale, fontFlags)
+                    BCP_SetFontOnce(permFS, fontPath, fontSize * fontScale, fontFlags)
                 end
             end
 
             if tempFS then
                 local fontPath, fontSize, fontFlags = tempFS:GetFont()
                 if fontPath and fontSize then
-                    tempFS:SetFont(fontPath, fontSize * fontScale, fontFlags)
+                    BCP_SetFontOnce(tempFS, fontPath, fontSize * fontScale, fontFlags)
                 end
             end
         end
@@ -294,8 +338,7 @@ function BCP_CreateBCSCompatStatFrame(skin, parent, name, yOffset, cardWidth)
 
     local baseLabelSize = cfg.StatLabelFontSize or 10
     local lFontPath, _, lFontFlags = label:GetFont()
-    label:SetFont(lFontPath, baseLabelSize * fontScale, lFontFlags)
-
+    BCP_SetFontOnce(label, lFontPath, baseLabelSize * fontScale, lFontFlags)
     _G[name .. "Label"] = label
 
     local valueText = textParent:CreateFontString(nil, "OVERLAY", valueFontTemplate)
@@ -305,8 +348,7 @@ function BCP_CreateBCSCompatStatFrame(skin, parent, name, yOffset, cardWidth)
 
     local baseValueSize = cfg.StatValueFontSize or 10
     local vFontPath, _, vFontFlags = valueText:GetFont()
-    valueText:SetFont(vFontPath, baseValueSize * fontScale, vFontFlags)
-
+    BCP_SetFontOnce(valueText, vFontPath, baseValueSize * fontScale, vFontFlags)
     _G[name .. "StatText"] = valueText
 
     return frame
@@ -440,7 +482,7 @@ function BCP_BuildScrollContent(skin, contentFrame, scrollFrame, scrollBar, bcsC
 
             local title = titleFrame:CreateFontString(nil, "OVERLAY")
             local fontPath, fontSize, fontFlags = skin:GetCardTitleFont()
-            title:SetFont(fontPath, math.floor(fontSize * fontScale), fontFlags)
+            BCP_SetFontOnce(title, fontPath, math.floor(fontSize * fontScale), fontFlags)
             title:SetPoint("TOP", card, "TOP", 0, -titleTopPad)
             title:SetWidth(cardWidth - (BCP_CARD_PADDING * 2))
             title:SetJustifyH("CENTER")
@@ -552,7 +594,7 @@ function BCP_BuildScrollContent(skin, contentFrame, scrollFrame, scrollBar, bcsC
 
             local titleFS = titleFrame:CreateFontString(nil, "OVERLAY")
             local fontPath, fontSize, fontFlags = skin:GetCardTitleFont()
-            titleFS:SetFont(fontPath, math.floor(fontSize * fontScale), fontFlags)
+            BCP_SetFontOnce(titleFS, fontPath, math.floor(fontSize * fontScale), fontFlags)
             titleFS:SetPoint("TOP", card, "TOP", 0, -titleTopPad)
             titleFS:SetWidth(innerWidth)
             titleFS:SetJustifyH("CENTER")
@@ -562,7 +604,7 @@ function BCP_BuildScrollContent(skin, contentFrame, scrollFrame, scrollBar, bcsC
             local rowY = -(titleTopPad + BCP_TITLE_H)
 
             for _, statFrame in ipairs(cardDef.frames) do
-                statFrame:SetParent(card)
+                BCP_Reparent(statFrame, card)
                 statFrame:ClearAllPoints()
                 statFrame:SetPoint("TOPLEFT", card, "TOPLEFT", BCP_CARD_PADDING + statFrameXOffset, rowY)
                 statFrame:SetWidth(calculatedFrameW)
@@ -677,6 +719,132 @@ local function BCP_HideStockStatPanels()
             end
         end
     end
+end
+
+-- =====================================================
+-- =   Outfitter "Enable none" / "Enable all" buttons   =
+-- =====================================================
+-- Outfitter's own XML names them OutfitterEnableAll (label "Enable none") and OutfitterEnableNone (label
+-- "Enable all"). By default they end up on top of the weapon slots. Here they are moved to the header of the
+-- character window, one on each side of the name: "Enable none" above the Head slot (top of the left slot
+-- column) and "Enable all" above the Hands slot (top of the right slot column).
+-- Nothing is searched: only these global names are used. Adjust live with:
+--   /bcpbtn <x> <y>       x = how far each button moves inwards (the right one mirrors it), y = height above the slot
+--   /bcpbtn               (status)    /bcpbtn off | on   (leave Outfitter's own position / use ours)    /bcpbtn debug
+local BCP_OUTFITTER_BTN_DEFAULT = { X = 0, Y = 38 }
+
+local function BCP_OutfitterBtnWanted()
+    local cfg = BCPConfig and BCPConfig.OutfitterTop
+
+    return not (cfg and cfg.Off)
+end
+
+function BCP_PlaceOutfitterButtons()
+    local left = getglobal("OutfitterEnableAll")
+    local right = getglobal("OutfitterEnableNone")
+    local leftSlot = getglobal("CharacterHeadSlot")
+    local rightSlot = getglobal("CharacterHandsSlot")
+
+    if not (left and right and leftSlot and rightSlot) or not BCP_OutfitterBtnWanted() then
+        return
+    end
+
+    local c = (BCPConfig and BCPConfig.OutfitterTop) or BCP_OUTFITTER_BTN_DEFAULT
+
+    BCP_BtnPlaceCount = (BCP_BtnPlaceCount or 0) + 1
+
+    left:ClearAllPoints()
+    left:SetPoint("BOTTOMLEFT", leftSlot, "TOPLEFT", c.X or 0, c.Y or 38)
+
+    right:ClearAllPoints()
+    right:SetPoint("BOTTOMRIGHT", rightSlot, "TOPRIGHT", -(c.X or 0), c.Y or 38)
+
+    -- Outfitter may place them again when these windows open, so place them again right after.
+    local frames = { OutfitterFrame, OutfitterSlotEnables }
+
+    for _, f in ipairs(frames) do
+        if f and not f.bcpBtnHooked then
+            f.bcpBtnHooked = true
+
+            local origOnShow = f:GetScript("OnShow")
+
+            f:SetScript("OnShow", function()
+                if origOnShow then
+                    origOnShow()
+                end
+
+                BCP_PlaceOutfitterButtons()
+            end)
+        end
+    end
+end
+
+-- Something else (Outfitter or the UI skin) may move the buttons again after we placed them. While they
+-- are visible, check every frame (two cheap anchor reads) and put them back if their anchor is not ours.
+local BCP_BtnEnforcer = CreateFrame("Frame")
+
+BCP_BtnEnforcer:SetScript("OnUpdate", function()
+    local left = getglobal("OutfitterEnableAll")
+    local right = getglobal("OutfitterEnableNone")
+
+    if not (left and right and left:IsVisible()) or not BCP_OutfitterBtnWanted() then
+        return
+    end
+
+    local _, relLeft = left:GetPoint()
+    local _, relRight = right:GetPoint()
+
+    if relLeft ~= getglobal("CharacterHeadSlot") or relRight ~= getglobal("CharacterHandsSlot") then
+        BCP_PlaceOutfitterButtons()
+    end
+end)
+
+SLASH_BCPBTN1 = "/bcpbtn"
+SlashCmdList["BCPBTN"] = function(msg)
+    msg = msg or ""
+
+    if not BCPConfig then
+        return
+    end
+
+    local _, _, x, y = string.find(msg, "^%s*(-?[%d%.]+)%s+(-?[%d%.]+)")
+
+    if msg == "off" then
+        BCPConfig.OutfitterTop = BCPConfig.OutfitterTop or {}
+        BCPConfig.OutfitterTop.Off = true
+    elseif msg == "on" then
+        BCPConfig.OutfitterTop = BCPConfig.OutfitterTop or {}
+        BCPConfig.OutfitterTop.Off = nil
+    elseif msg == "debug" then
+        DEFAULT_CHAT_FRAME:AddMessage("|cff66ccffBCP|r placement calls so far: " .. tostring(BCP_BtnPlaceCount or 0) ..
+            "  file version: btn-v9")
+
+        local l = getglobal("OutfitterEnableAll")
+        local r = getglobal("OutfitterEnableNone")
+
+        for _, b in ipairs({ l, r }) do
+            if b then
+                local pt, rel, relpt, ox, oy = b:GetPoint()
+
+                DEFAULT_CHAT_FRAME:AddMessage("|cff66ccffBCP|r " .. tostring(b:GetName()) .. ": L=" .. tostring(b:GetLeft()) ..
+                    " B=" .. tostring(b:GetBottom()) .. " anchor=" .. tostring(pt) .. " to " .. tostring(rel and rel:GetName()) ..
+                    " " .. tostring(relpt) .. " (" .. tostring(ox) .. "," .. tostring(oy) .. ")")
+            end
+        end
+    elseif tonumber(x) and tonumber(y) then
+        BCPConfig.OutfitterTop = { X = tonumber(x), Y = tonumber(y) }
+    end
+
+    BCP_PlaceOutfitterButtons()
+
+    local c = BCPConfig.OutfitterTop or BCP_OUTFITTER_BTN_DEFAULT
+
+    DEFAULT_CHAT_FRAME:AddMessage("|cff66ccffBCP|r Outfitter buttons: found=" ..
+        tostring((getglobal("OutfitterEnableAll") and getglobal("OutfitterEnableNone")) and true or false) ..
+        " slots=" .. tostring((getglobal("CharacterHeadSlot") and getglobal("CharacterHandsSlot")) and true or false) ..
+        " active=" .. tostring(BCP_OutfitterBtnWanted()) ..
+        "  x " .. (c.X or 0) .. ", y " .. (c.Y or 38) ..
+        "   (usage: /bcpbtn 0 38 | off | on | debug)")
 end
 
 BCP_RefreshCount = {}
@@ -809,6 +977,7 @@ function PaperDollFrame_OnShow()
     end
 
     BCP_GetActiveSkin():OnPaperDollShow()
+    BCP_PlaceOutfitterButtons()
     BCP_Refresh("player", "BCP_")
 end
 
