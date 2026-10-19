@@ -57,6 +57,11 @@ skin.FrameValues = {
 }
 
 skin.Config = {
+    -- Outfitter's "Enable none" / "Enable all" buttons: X = inwards offset of the left button from the Head
+    -- slot's left edge, XR = inwards offset of the right button from the Hands slot's right edge, Y = height
+    -- above the slots' top edge. They sit in the free row under the guild line, left and right of centre.
+    OutfitterButtons = { X = 92, XR = 64, Y = 2, W = 74, H = 14 }, -- W/H: button size (stock 80x18), so they fit the row without touching the text above or the frame below
+
     -- Character model position
     ModelOffsetX = 65,
     ModelOffsetY = -128, -- stock was -120; more negative = lower
