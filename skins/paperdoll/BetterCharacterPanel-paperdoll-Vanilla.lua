@@ -59,7 +59,7 @@ skin.FrameValues = {
 skin.Config = {
     -- Character model position
     ModelOffsetX = 65,
-    ModelOffsetY = -160, -- stock was -120; more negative = lower
+    ModelOffsetY = -128, -- stock was -120; more negative = lower
     -- Character model size (1.0 = stock). The model's viewport is scaled by this and the model
     -- itself is scaled back by 1/this, so the model is this much bigger but never cropped.
     ModelScale = 1.25,
@@ -156,7 +156,7 @@ function skin:OnCharacterFrameTabClick() end
 function skin:OnCharacterFrameShowSubFrame() end
 
 local function BCP_AnchorResistanceFrame(infoFrame, aboveSection, cfg)
-    CharacterResistanceFrame:SetParent(infoFrame)
+    BCP_Reparent(CharacterResistanceFrame, infoFrame)
     CharacterResistanceFrame:ClearAllPoints()
     CharacterResistanceFrame:SetPoint("BOTTOM", aboveSection, "TOP", -6, 12)
 
@@ -322,7 +322,7 @@ function BCP_ApplyModelLayout(cfg)
     CharacterModelFrame:SetScale(scale)
 
     -- Scaling the frame also grows the model by roughly scale^2; cancel the extra factor.
-    if CharacterModelFrame.SetModelScale then
+    if scale ~= 1 and CharacterModelFrame.SetModelScale then
         CharacterModelFrame:SetModelScale(1 / scale)
     end
 
