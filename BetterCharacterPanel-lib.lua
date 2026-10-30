@@ -41,6 +41,31 @@ local function GetRealmPhase(realmName)
     return nil
 end
 
+-- The realm never changes during a session: look its phase table up once.
+local cachedRealmPhase = nil
+local cachedRealmKnown = false
+
+local function GetCurrentRealmPhase()
+    if cachedRealmKnown then
+        return cachedRealmPhase, true
+    end
+
+    local realm = GetRealmName()
+
+    if not realm or realm == "" then
+        return nil, false
+    end
+
+    cachedRealmPhase = GetRealmPhase(realm)
+    cachedRealmKnown = true
+
+    return cachedRealmPhase, true
+end
+
+-- Results of the "is this item missing an enchant?" check, per slot and item id. The answer for a given
+-- item in a given slot never changes during a session, so the (long) enchant tables are walked only once.
+local MissingEnchantCache = {}
+
 -- Taken from pfUI by Shagu
 local function HookScript(f, script, func)
     local prev = f:GetScript(script)
@@ -55,10 +80,18 @@ local function HookScript(f, script, func)
 end
 
 -- Taken from pfUI by Shagu
+local isTurtleWoW = false
+
 function BCPLib:IsPlayingOnTurtleWoW()
+    if isTurtleWoW then
+        return true
+    end
+
     if not TargetHPText or not TargetHPPercText then
         return false
     end
+
+    isTurtleWoW = true
 
     return true
 end
@@ -89,33 +122,54 @@ function BCPLib:GetTemporyEnchantDataFromEnchantId(enchantId)
     }
 end
 
-function BCPLib:IsEquippedItemMissingPermanentEnchant(unit, slot)
+-- itemInfo is optional (the GetEquippedItem table, when the caller already has it).
+-- Returns: isMissing, complete. "complete" is false when the item data could not be read yet; such an
+-- answer must not be remembered by the caller.
+function BCPLib:IsEquippedItemMissingPermanentEnchant(unit, slot, itemInfo)
     if slot == BS.Shirt or slot == BS.Trinket1 or slot == BS.Trinket2 or slot == BS.Tabard then
-        return false
+        return false, true
     end
 
-    local itemInfo = GetEquippedItem(unit, slot)
+    if not itemInfo then
+        itemInfo = GetEquippedItem(unit, slot)
+    end
 
     if not itemInfo then
-        return false
+        return false, true
     end
 
     if itemInfo.permanentEnchantId and itemInfo.permanentEnchantId ~= 0 then
-        return false
+        return false, true
     end
 
     local enchantTables = SlotPermanentEnchants[slot]
 
     if not enchantTables then
-        return false
+        return false, true
     end
 
-    local realmPhase = GetRealmPhase(GetRealmName())
+    local itemId = itemInfo.itemId
+    local slotCache = MissingEnchantCache[slot]
+
+    if not slotCache then
+        slotCache = {}
+        MissingEnchantCache[slot] = slotCache
+    end
+
+    if itemId then
+        local cached = slotCache[itemId]
+
+        if cached ~= nil then
+            return cached, true
+        end
+    end
+
+    local realmPhase, realmKnown = GetCurrentRealmPhase()
 
     local okLevel, itemLevel = pcall(GetItemLevel, itemInfo.itemId)
 
     if not okLevel then
-        return false
+        return false, false
     end
 
     itemLevel = itemLevel or 0
@@ -123,20 +177,22 @@ function BCPLib:IsEquippedItemMissingPermanentEnchant(unit, slot)
     local okSub, itemSubClass = pcall(GetItemStatsField, itemInfo.itemId, "subclass")
 
     if not okSub then
-        return false
+        return false, false
     end
-
 
     local okClass, itemClass = pcall(GetItemStatsField, itemInfo.itemId, "class")
 
     if not okClass then
-        return false
+        return false, false
     end
 
     -- Dirty quick hack that offsets by 100 the subclass to share one item-type namespace with weapons
-    if itemClass == 4 then
+    if itemClass == 4 and itemSubClass then
         itemSubClass = itemSubClass + 100
     end
+
+    local result = false
+    local isTurtle = BCPLib:IsPlayingOnTurtleWoW()
 
     for _, enchantTable in ipairs(enchantTables) do
         for _, enchantData in pairs(enchantTable) do
@@ -145,7 +201,7 @@ function BCPLib:IsEquippedItemMissingPermanentEnchant(unit, slot)
             local phaseLocked = enchantData[3]
             local turtleWoWOnly = enchantData[4]
 
-            if not turtleWoWOnly or BCPLib:IsPlayingOnTurtleWoW() then
+            if not turtleWoWOnly or isTurtle then
                 local phaseOk = true
 
                 if phaseLocked then
@@ -167,14 +223,24 @@ function BCPLib:IsEquippedItemMissingPermanentEnchant(unit, slot)
                     end
 
                     if itemTypeOk then
-                        return true
+                        result = true
+                        break
                     end
                 end
             end
         end
+
+        if result then
+            break
+        end
     end
 
-    return false
+    -- Only remember answers that were worked out with complete information
+    if itemId and realmKnown then
+        slotCache[itemId] = result
+    end
+
+    return result, realmKnown
 end
 
 function BCPLib:GetItemLevelFromEquipmentSlot(unit, slot)
@@ -222,33 +288,61 @@ function BCPLib:GetColorFromEquipmentSlot(unit, slot)
 end
 
 -- Taken from pfUI by Shagu
+-- Installed only once per frame: this is called every time a window opens, and each call used to wrap the
+-- frame's OnUpdate in one more layer, so the per-frame work grew with every open.
+-- PERF: the rotating OnUpdate is attached only while the mouse button is held (OnMouseDown) and removed on
+-- release (OnMouseUp / OnHide), so an idle model costs no Lua call per frame at all.
 function BCPLib:EnableClickRotate(frame)
+    if frame.bcpClickRotate then
+        return
+    end
+
+    frame.bcpClickRotate = true
     frame:EnableMouse(true)
 
-    HookScript(frame, "OnUpdate", function()
-        if this.rotate then
-            local x, _ = GetCursorPosition()
+    -- whatever OnUpdate the frame already had (kept running, and put back when the drag ends)
+    local prevUpdate = frame:GetScript("OnUpdate")
 
-            if this.curx > x then
-                this.rotation = this.rotation - abs(x - this.curx) * 0.025
-            elseif this.curx < x then
-                this.rotation = this.rotation + abs(x - this.curx) * 0.025
-            end
-
-            this:SetRotation(this.rotation)
-            this.curx, this.cury = x, y
+    local function RotateOnUpdate()
+        if prevUpdate then
+            prevUpdate()
         end
-    end)
+
+        if not this.rotate then
+            return
+        end
+
+        local x = GetCursorPosition()
+        local curx = this.curx
+
+        if curx and curx ~= x then
+            this.rotation = (this.rotation or 0) + (x - curx) * 0.025
+            this:SetRotation(this.rotation)
+        end
+
+        this.curx = x
+    end
+
+    local function StopRotate()
+        this.rotate, this.curx = nil, nil
+        this:SetScript("OnUpdate", prevUpdate)
+    end
 
     HookScript(frame, "OnMouseDown", function()
         if arg1 == "LeftButton" then
             this.rotate = true
-            this.curx, this.cury = GetCursorPosition()
+            this.curx = GetCursorPosition()
+            this:SetScript("OnUpdate", RotateOnUpdate)
         end
     end)
 
-    HookScript(frame, "OnMouseUp", function()
-        this.rotate, this.curx, this.cury = nil, nil, nil
+    HookScript(frame, "OnMouseUp", StopRotate)
+
+    -- A window closed in the middle of a drag must not start spinning by itself when it opens again
+    HookScript(frame, "OnHide", function()
+        if this.rotate then
+            StopRotate()
+        end
     end)
 end
 
