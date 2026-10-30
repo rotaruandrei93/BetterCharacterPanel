@@ -88,6 +88,7 @@ skin.Config = {
     ResistanceItemWidth = 20,
     ResistanceFrameHeight = 20,
     ResistanceItemSpacing = 8,
+    ResistanceSideInset = 12, -- the panel's border thickness on the left/right; the row stays inside it
 
     -- Scroll frame
     ScrollTopPad = 45,
@@ -128,10 +129,13 @@ skin.Config = {
 
 function skin:ApplyCardBackdrop(card)
     local cfg = self.Config
+
+    -- The card background is tinted (0, 0, 0, 0.65), i.e. plain translucent black whatever the texture looks
+    -- like, so one stretched solid texture draws exactly the same as the tiled dialog texture, with far
+    -- fewer quads for the client to build and blend.
     card:SetBackdrop({
-        bgFile = cfg.BackdropBgFile,
-        tile = true,
-        tileSize = cfg.BackdropTileSize,
+        bgFile = "Interface\\Buttons\\WHITE8x8",
+        tile = false,
         edgeFile = cfg.BackdropEdgeFile,
         edgeSize = cfg.BackdropEdgeSize,
         insets = cfg.BackdropInsets,
@@ -161,32 +165,7 @@ function skin:OnCharacterFrameTabClick() end
 function skin:OnCharacterFrameShowSubFrame() end
 
 local function BCP_AnchorResistanceFrame(infoFrame, aboveSection, cfg)
-    BCP_Reparent(CharacterResistanceFrame, infoFrame)
-    CharacterResistanceFrame:ClearAllPoints()
-    CharacterResistanceFrame:SetPoint("BOTTOM", aboveSection, "TOP", -6, 12)
-
-    local xOffset = 0
-
-    for _, child in ipairs({ CharacterResistanceFrame:GetChildren() }) do
-        child:ClearAllPoints()
-        child:SetPoint("TOPLEFT", CharacterResistanceFrame, "TOPLEFT", xOffset, 0)
-
-        -- FIX: center the resistance number inside its icon
-        for _, region in ipairs({ child:GetRegions() }) do
-            if region:GetObjectType() == "FontString" then
-                region:ClearAllPoints()
-                region:SetPoint("CENTER", child, "CENTER", 0, 0)
-                region:SetDrawLayer("OVERLAY")
-            end
-        end
-        xOffset = xOffset + cfg.ResistanceItemWidth + cfg.ResistanceItemSpacing
-    end
-
-    CharacterResistanceFrame:SetWidth(xOffset)
-    CharacterResistanceFrame:SetHeight(cfg.ResistanceFrameHeight)
-
-    -- FIX: draw above the panel and cards
-    CharacterResistanceFrame:SetFrameStrata("HIGH")
+    BCP_SetupResistanceFrame(infoFrame, aboveSection, cfg)
 end
 
 -- FIX: Outfitter anchors itself to the stock character frame, which is narrower than the stats
@@ -310,9 +289,14 @@ function BCP_ApplyModelLayout(cfg)
 
     CharacterModelFrame:ClearAllPoints()
 
+    -- A size saved with /bcpmodel wins over the skin's default
+    local saved = BCPConfig and BCPConfig.ModelLayout
+    local widthFactor = (saved and saved.Width) or cfg.ModelWidthFactor or 1
+    local heightFactor = (saved and saved.Height) or cfg.ModelHeightFactor or 1
+
     -- Enlarge the model's viewport and the model together (no cropping), keeping the
     -- frame's centre where the unscaled frame's centre would be.
-    local scale = cfg.ModelScale or 1
+    local scale = (saved and saved.Scale) or cfg.ModelScale or 1
 
     if not CharacterModelFrame.bcpOrigW then
         CharacterModelFrame.bcpOrigW = CharacterModelFrame:GetWidth()
@@ -322,8 +306,8 @@ function BCP_ApplyModelLayout(cfg)
     local centerX = cfg.ModelOffsetX + (CharacterModelFrame.bcpOrigW / 2)
     local centerY = cfg.ModelOffsetY - (CharacterModelFrame.bcpOrigH / 2)
 
-    CharacterModelFrame:SetWidth(CharacterModelFrame.bcpOrigW * (cfg.ModelWidthFactor or 1))
-    CharacterModelFrame:SetHeight(CharacterModelFrame.bcpOrigH * (cfg.ModelHeightFactor or 1))
+    CharacterModelFrame:SetWidth(CharacterModelFrame.bcpOrigW * widthFactor)
+    CharacterModelFrame:SetHeight(CharacterModelFrame.bcpOrigH * heightFactor)
     CharacterModelFrame:SetScale(scale)
 
     -- Scaling the frame also grows the model by roughly scale^2; cancel the extra factor.
@@ -335,20 +319,36 @@ function BCP_ApplyModelLayout(cfg)
 end
 
 -- /bcpmodel <scale> <widthFactor> <heightFactor>   e.g. /bcpmodel 1 1 1 (stock size, cheapest to draw)
--- Live test, not saved. Bigger numbers = more pixels for the 3D model to draw each frame.
+-- /bcpmodel reset   goes back to the skin's default size.
+-- The choice is saved per character. Bigger numbers = more pixels for the 3D model to draw each frame.
 SLASH_BCPMODEL1 = "/bcpmodel"
 SlashCmdList["BCPMODEL"] = function(msg)
     local cfg = BCP_ModelCfg
-    local _, _, a, b, c = string.find(msg or "", "^%s*([%d%.]+)%s+([%d%.]+)%s+([%d%.]+)")
+    msg = msg or ""
 
-    if cfg and a and tonumber(a) and tonumber(a) > 0 then
-        cfg.ModelScale, cfg.ModelWidthFactor, cfg.ModelHeightFactor = tonumber(a), tonumber(b), tonumber(c)
-        BCP_ApplyModelLayout(cfg)
+    if not cfg then
+        DEFAULT_CHAT_FRAME:AddMessage("|cff66ccffBCP|r open the Character window once first, then use /bcpmodel again.")
+        return
     end
 
-    if cfg then
-        DEFAULT_CHAT_FRAME:AddMessage("|cff66ccffBCP|r model: scale " .. (cfg.ModelScale or 1) .. ", width " .. (cfg.ModelWidthFactor or 1) .. ", height " .. (cfg.ModelHeightFactor or 1) .. "   (usage: /bcpmodel 1 1 1)")
+    local _, _, a, b, c = string.find(msg, "^%s*([%d%.]+)%s+([%d%.]+)%s+([%d%.]+)")
+
+    if BCPConfig then
+        if string.find(msg, "^%s*reset") then
+            BCPConfig.ModelLayout = nil
+            BCP_ApplyModelLayout(cfg)
+        elseif a and tonumber(a) and tonumber(a) > 0 and tonumber(b) and tonumber(b) > 0 and tonumber(c) and tonumber(c) > 0 then
+            BCPConfig.ModelLayout = { Scale = tonumber(a), Width = tonumber(b), Height = tonumber(c) }
+            BCP_ApplyModelLayout(cfg)
+        end
     end
+
+    local saved = BCPConfig and BCPConfig.ModelLayout
+
+    DEFAULT_CHAT_FRAME:AddMessage("|cff66ccffBCP|r model: scale " .. ((saved and saved.Scale) or cfg.ModelScale or 1) ..
+        ", width " .. ((saved and saved.Width) or cfg.ModelWidthFactor or 1) ..
+        ", height " .. ((saved and saved.Height) or cfg.ModelHeightFactor or 1) ..
+        "   (usage: /bcpmodel 1 1 1   or   /bcpmodel reset)")
 end
 
 -- ==============================
