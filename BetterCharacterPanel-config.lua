@@ -116,17 +116,8 @@ local function BCP_CreateMinimapButton()
 
     btn:RegisterForDrag("LeftButton")
 
-    btn:SetScript("OnDragStart", function()
-        if IsControlKeyDown() then
-            this.isDragging = true
-        end
-    end)
-
-    btn:SetScript("OnDragStop", function()
-        this.isDragging = false
-    end)
-
-    btn:SetScript("OnUpdate", function()
+    -- The drag handler is attached only while dragging, so the button costs nothing per frame otherwise.
+    local function BCP_MinimapDragUpdate()
         if not this.isDragging then
             return
         end
@@ -146,6 +137,18 @@ local function BCP_CreateMinimapButton()
         end
 
         BCP_UpdateMinimapButtonPosition()
+    end
+
+    btn:SetScript("OnDragStart", function()
+        if IsControlKeyDown() then
+            this.isDragging = true
+            this:SetScript("OnUpdate", BCP_MinimapDragUpdate)
+        end
+    end)
+
+    btn:SetScript("OnDragStop", function()
+        this.isDragging = false
+        this:SetScript("OnUpdate", nil)
     end)
 
     BCP_UpdateMinimapButtonPosition()
