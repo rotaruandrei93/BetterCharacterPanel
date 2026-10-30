@@ -87,6 +87,15 @@ skin.Config = {
     ResistanceItemWidth = 26,
     ResistanceFrameHeight = 26,
     ResistanceItemSpacing = 2,
+    ResistanceScale = 0.85,
+    ResistanceSideInset = 2,
+    ResistanceBandTop = 6,
+    ResistanceTopAlign = true,
+    ResistanceScrollX = 2,
+    -- the visible window is the unified backdrop, not the (taller) info frame
+    ResistanceRefFrame = function()
+        return BCPPFUIUnifiedBackdrop and BCPPFUIUnifiedBackdrop.backdrop
+    end,
 
     -- BCS stats frame
     StatValueWidth = 80,
@@ -137,6 +146,11 @@ local function RestoreOriginals()
 end
 
 local function SetCustomPositionCloseButton()
+    -- the backdrop is created the first time the paper doll shows; nothing to anchor to before that
+    if not (BCPPFUIUnifiedBackdrop and BCPPFUIUnifiedBackdrop.backdrop) then
+        return
+    end
+
     CharacterFrameCloseButton:ClearAllPoints()
     CharacterFrameCloseButton:SetPoint("TOPRIGHT",
         BCPPFUIUnifiedBackdrop.backdrop, "TOPRIGHT", -4, -4)
@@ -202,33 +216,7 @@ function skin:OnCharacterFrameShowSubFrame()
 end
 
 local function BCP_AnchorResistanceFrame(infoFrame, aboveSection, cfg)
-    BCP_Reparent(CharacterResistanceFrame, infoFrame)
-    CharacterResistanceFrame:ClearAllPoints()
-    CharacterResistanceFrame:SetPoint("BOTTOM", aboveSection, "TOP", 0, 4)
-
-    local xOffset = 0
-
-    for _, child in ipairs({ CharacterResistanceFrame:GetChildren() }) do
-        child:ClearAllPoints()
-        child:SetPoint("TOPLEFT", CharacterResistanceFrame, "TOPLEFT", xOffset, 0)
-
-        -- FIX: center the resistance number inside its icon
-        for _, region in ipairs({ child:GetRegions() }) do
-            if region:GetObjectType() == "FontString" then
-                region:ClearAllPoints()
-                region:SetPoint("CENTER", child, "CENTER", 0, 0)
-                region:SetDrawLayer("OVERLAY")
-            end
-        end
-        xOffset = xOffset + cfg.ResistanceItemWidth + cfg.ResistanceItemSpacing
-    end
-
-    CharacterResistanceFrame:SetWidth(xOffset)
-    CharacterResistanceFrame:SetHeight(cfg.ResistanceFrameHeight)
-
-    -- FIX: draw above the backdrop/cards and shrink so the row clears the close button
-    CharacterResistanceFrame:SetFrameStrata("HIGH")
-    CharacterResistanceFrame:SetScale(0.85)
+    BCP_SetupResistanceFrame(infoFrame, aboveSection, cfg)
 end
 
 
@@ -256,7 +244,7 @@ local function BCP_FitScrollBottom(cfg)
     end
 
     scroll:ClearAllPoints()
-    scroll:SetPoint("TOPLEFT", info, "TOPLEFT", 2, -cfg.ScrollTopPad)
+    scroll:SetPoint("TOPLEFT", info, "TOPLEFT", 2, -(cfg.ScrollTopPadDyn or cfg.ScrollTopPad))
     scroll:SetPoint("BOTTOMRIGHT", info, "BOTTOMRIGHT", 0, overhang + 6)
 end
 
@@ -297,33 +285,10 @@ function skin:OnPaperDollShow()
         SaveOriginals()
     end
 
-    -- Shift the model downward to center it
+    -- Shift the model downward to center it and enlarge it (shared with the default skin, so /bcpmodel and
+    -- the saved model size work the same with pfUI)
     if CharacterModelFrame then
-        CharacterModelFrame:ClearAllPoints()
-
-        -- Enlarge the whole model frame (the model grows with its viewport, so nothing gets
-        -- clipped), keeping its centre where the unscaled frame's centre would be.
-        local scale = cfg.ModelScale or 1
-        if not CharacterModelFrame.bcpOrigW then
-            CharacterModelFrame.bcpOrigW = CharacterModelFrame:GetWidth()
-            CharacterModelFrame.bcpOrigH = CharacterModelFrame:GetHeight()
-        end
-
-        local centerX = cfg.ModelOffsetX + (CharacterModelFrame.bcpOrigW / 2)
-        local centerY = cfg.ModelOffsetY - (CharacterModelFrame.bcpOrigH / 2)
-
-        CharacterModelFrame:SetWidth(CharacterModelFrame.bcpOrigW * (cfg.ModelWidthFactor or 1))
-        CharacterModelFrame:SetHeight(CharacterModelFrame.bcpOrigH * (cfg.ModelHeightFactor or 1))
-
-        CharacterModelFrame:SetScale(scale)
-
-        -- Scaling the frame also grows the model by roughly scale^2 (viewport * model), which
-        -- crops the head. Cancel the extra factor so the model grows only as much as the viewport.
-        if scale ~= 1 and CharacterModelFrame.SetModelScale then
-            CharacterModelFrame:SetModelScale(1 / scale)
-        end
-
-        CharacterModelFrame:SetPoint("CENTER", PaperDollFrame, "TOPLEFT", centerX / scale, centerY / scale)
+        BCP_ApplyModelLayout(cfg)
 
         -- Model above the paper doll (so it gets clicks) but below the item slots
         BCP_LayerModelBehindSlots()
@@ -436,7 +401,8 @@ function skin:OnPaperDollShow()
         local bottomPad = isWideMode and 0 or cfg.ScrollBottomPad
 
         BCPPFUIStatsScrollFrame:ClearAllPoints()
-        BCPPFUIStatsScrollFrame:SetPoint("TOPLEFT", BCPPFUICharacterInformationFrame, "TOPLEFT", 2, -cfg.ScrollTopPad)
+        BCPPFUIStatsScrollFrame:SetPoint("TOPLEFT", BCPPFUICharacterInformationFrame, "TOPLEFT", 2,
+            -(cfg.ScrollTopPadDyn or cfg.ScrollTopPad))
         BCPPFUIStatsScrollFrame:SetPoint("BOTTOMRIGHT", BCPPFUICharacterInformationFrame, "BOTTOMRIGHT", 0, bottomPad)
         BCP_FitScrollBottom(cfg)
     end
