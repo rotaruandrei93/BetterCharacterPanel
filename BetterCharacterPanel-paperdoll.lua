@@ -24,10 +24,8 @@ function BCP_SetFontOnce(fs, path, size, flags)
         size = math.floor(size + 0.5)
     end
 
-    local key = tostring(path) .. "|" .. tostring(size) .. "|" .. tostring(flags)
-
-    if fs.bcpFontKey ~= key then
-        fs.bcpFontKey = key
+    if fs.bcpFontPath ~= path or fs.bcpFontSize ~= size or fs.bcpFontFlags ~= flags then
+        fs.bcpFontPath, fs.bcpFontSize, fs.bcpFontFlags = path, size, flags
         fs:SetFont(path, size, flags)
     end
 end
@@ -219,15 +217,22 @@ local function BCP_Init(prefix, frameValues)
     initialized[prefix] = true
 end
 
-local function GetEnchantTexts(unit, slotId, libSlot)
-    local itemInfo = GetEquippedItem(unit, slotId)
+-- itemInfo: pass the already fetched GetEquippedItem() table (or false for "no item") to avoid a second
+-- lookup; leave it nil to have it fetched here.
+-- Returns: permText, tempText, isMissing, complete. "complete" is false when item data was not available
+-- yet, so the caller must not cache the result.
+local function GetEnchantTexts(unit, slotId, libSlot, itemInfo)
+    if itemInfo == nil then
+        itemInfo = GetEquippedItem(unit, slotId)
+    end
 
     if not itemInfo then
-        return "", "", false
+        return "", "", false, true
     end
 
     local permText = ""
     local isMissing = false
+    local complete = true
     local permId = itemInfo.permanentEnchantId
 
     if permId and permId ~= 0 then
@@ -241,8 +246,10 @@ local function GetEnchantTexts(unit, slotId, libSlot)
     else
         local ok, quality = pcall(GetItemStatsField, itemInfo.itemId, "quality")
 
-        if ok and quality and quality >= BCPConfig.MissingEnchants.MinimumQuality then
-            isMissing = BCPLib:IsEquippedItemMissingPermanentEnchant(unit, libSlot)
+        if not ok then
+            complete = false
+        elseif quality and quality >= BCPConfig.MissingEnchants.MinimumQuality then
+            isMissing, complete = BCPLib:IsEquippedItemMissingPermanentEnchant(unit, libSlot, itemInfo)
         end
     end
 
@@ -259,7 +266,7 @@ local function GetEnchantTexts(unit, slotId, libSlot)
         end
     end
 
-    return permText, tempText, isMissing
+    return permText, tempText, isMissing, complete
 end
 
 function BCP_GetBCSCategoryOrder()
@@ -305,6 +312,123 @@ function BCP_GetBCSCategoryOrder()
     return order
 end
 
+-- ---------------------------------------------------------------------------------------------------------
+-- Stat row text proxies.
+-- Better Character Stats writes every row through label:SetText() / text:SetText(). Each SetText makes the
+-- client measure and rebuild the string, even when the text did not change, and this addon used to clear all
+-- 72 strings first and let BCS write them again (two rebuilds per string per refresh). The proxy forwards
+-- everything to the real FontString, but skips SetText when the text is the same, and remembers in which
+-- refresh ("generation") it was last written so rows BCS did not write can be blanked afterwards.
+-- ---------------------------------------------------------------------------------------------------------
+local BCP_TextGen = 0
+
+local BCP_TextProxyMeta = {
+    __index = function(t, key)
+        local fs = t.bcpFS
+        local value = fs[key]
+
+        if type(value) ~= "function" then
+            return value
+        end
+
+        local cache = t.bcpCache
+        local wrapped = cache[key]
+
+        if not wrapped then
+            wrapped = function(_, a1, a2, a3, a4, a5, a6)
+                return value(fs, a1, a2, a3, a4, a5, a6)
+            end
+
+            cache[key] = wrapped
+        end
+
+        return wrapped
+    end,
+}
+
+local function BCP_MakeTextProxy(fs)
+    local proxy = { bcpFS = fs, bcpCache = {}, bcpGen = 0, bcpText = nil }
+
+    proxy.SetText = function(self, text)
+        if text == nil then
+            text = ""
+        end
+
+        self.bcpGen = BCP_TextGen
+
+        if self.bcpText ~= text then
+            self.bcpText = text
+            fs:SetText(text)
+        end
+    end
+
+    return setmetatable(proxy, BCP_TextProxyMeta)
+end
+
+-- ---------------------------------------------------------------------------------------------------------
+-- Stat row tooltips.
+-- BCS gives every stat row its own OnUpdate (36 Lua calls per frame while the window is open) only to redraw
+-- the tooltip every 0.2s while the mouse is over the row. We remove those and run ONE shared updater that
+-- exists only while a row's tooltip is actually showing.
+-- ---------------------------------------------------------------------------------------------------------
+local BCP_TipFrame = CreateFrame("Frame")
+local BCP_TipRow, BCP_TipTimer = nil, 0
+
+local function BCP_TipOnUpdate()
+    BCP_TipTimer = BCP_TipTimer - arg1
+
+    if BCP_TipTimer > 0 then
+        return
+    end
+
+    BCP_TipTimer = 0.2
+
+    local row = BCP_TipRow
+
+    -- IsShown() as well: a tooltip that was hidden must never be brought back by the refresher
+    if not (row and row:IsVisible() and GameTooltip:IsShown() and GameTooltip:IsOwned(row)) then
+        BCP_TipRow = nil
+        BCP_TipFrame:SetScript("OnUpdate", nil)
+        return
+    end
+
+    local base = row.bcpEnterBase
+
+    if base then
+        local previousThis = this
+
+        this = row
+        base()
+        this = previousThis
+    end
+end
+
+local function BCP_RowOnEnter()
+    local base = this.bcpEnterBase
+
+    if base then
+        base()
+    end
+
+    BCP_TipRow = this
+    BCP_TipTimer = 0.2
+    BCP_TipFrame:SetScript("OnUpdate", BCP_TipOnUpdate)
+end
+
+-- Called after BCS filled a stat row: drop its per-frame OnUpdate and route its OnEnter through ours.
+local function BCP_TidyStatRow(row)
+    if row:GetScript("OnUpdate") then
+        row:SetScript("OnUpdate", nil)
+    end
+
+    local onEnter = row:GetScript("OnEnter")
+
+    if onEnter and onEnter ~= BCP_RowOnEnter then
+        row.bcpEnterBase = onEnter
+        row:SetScript("OnEnter", BCP_RowOnEnter)
+    end
+end
+
 function BCP_CreateBCSCompatStatFrame(skin, parent, name, yOffset, cardWidth)
     local cfg = skin.Config
     local fontScale = (BCPConfig and BCPConfig.StatPanel and BCPConfig.StatPanel.FontScale) or 1.0
@@ -339,7 +463,7 @@ function BCP_CreateBCSCompatStatFrame(skin, parent, name, yOffset, cardWidth)
     local baseLabelSize = cfg.StatLabelFontSize or 10
     local lFontPath, _, lFontFlags = label:GetFont()
     BCP_SetFontOnce(label, lFontPath, baseLabelSize * fontScale, lFontFlags)
-    _G[name .. "Label"] = label
+    _G[name .. "Label"] = BCP_MakeTextProxy(label)
 
     local valueText = textParent:CreateFontString(nil, "OVERLAY", valueFontTemplate)
     valueText:SetPoint("RIGHT", frame, "RIGHT", -rightPad, 0)
@@ -349,12 +473,16 @@ function BCP_CreateBCSCompatStatFrame(skin, parent, name, yOffset, cardWidth)
     local baseValueSize = cfg.StatValueFontSize or 10
     local vFontPath, _, vFontFlags = valueText:GetFont()
     BCP_SetFontOnce(valueText, vFontPath, baseValueSize * fontScale, vFontFlags)
-    _G[name .. "StatText"] = valueText
+    _G[name .. "StatText"] = BCP_MakeTextProxy(valueText)
 
     return frame
 end
 
 local BCP_BCSRefreshing = false
+local BCP_BCSDirty = false
+local BCP_QueueRefresh -- defined further down; declared here so earlier functions can call it
+
+local BCP_BCSForce = false -- true while a refresh needs BCS to recalculate right now (not throttled)
 
 function BCP_RefreshBCSSections(skipBCSUpdate)
     if not BCP_IS_USING_BCS then
@@ -376,7 +504,10 @@ function BCP_RefreshBCSSections(skipBCSUpdate)
     end
 
     if not skipBCSUpdate then
-        BCS:UpdateStats()
+        -- protected, so a failing BCS can never leave the refreshing flag stuck on
+        BCP_BCSForce = true
+        pcall(BCS.UpdateStats, BCS)
+        BCP_BCSForce = false
     end
 
     if BCS then
@@ -388,20 +519,52 @@ function BCP_RefreshBCSSections(skipBCSUpdate)
     end
 
     for _, sectionInfo in ipairs(BCP_BCSSectionPrefixes) do
-        for j = 1, 6 do
-            local lbl = getglobal(sectionInfo.prefix .. j .. "Label")
-            local val = getglobal(sectionInfo.prefix .. j .. "StatText")
+        local labels = sectionInfo.labels
 
-            if lbl then
-                lbl:SetText("")
+        if not labels then
+            labels, sectionInfo.values, sectionInfo.rows = {}, {}, {}
+
+            for j = 1, 6 do
+                labels[j] = getglobal(sectionInfo.prefix .. j .. "Label")
+                sectionInfo.values[j] = getglobal(sectionInfo.prefix .. j .. "StatText")
+                sectionInfo.rows[j] = getglobal(sectionInfo.prefix .. j)
             end
 
-            if val then
-                val:SetText("")
+            -- Only keep the lookup once the rows really exist
+            if labels[1] then
+                sectionInfo.labels = labels
+            else
+                sectionInfo.values, sectionInfo.rows = nil, nil
             end
         end
 
+        local values = sectionInfo.values
+        local rows = sectionInfo.rows
+
+        BCP_TextGen = BCP_TextGen + 1
+        local gen = BCP_TextGen
+
         pcall(BCS.UpdatePaperdollStats, BCS, sectionInfo.prefix, sectionInfo.categoryKey)
+
+        for j = 1, 6 do
+            local lbl = labels[j]
+            local val = values and values[j]
+            local row = rows and rows[j]
+
+            -- rows BCS did not write this time are blanked (same end result as clearing first, but the
+            -- strings that did get written are only rebuilt when their text really changed)
+            if lbl and lbl.bcpFS and lbl.bcpGen ~= gen then
+                lbl:SetText("")
+            end
+
+            if val and val.bcpFS and val.bcpGen ~= gen then
+                val:SetText("")
+            end
+
+            if row then
+                BCP_TidyStatRow(row)
+            end
+        end
     end
 
     if BCSFrame then
@@ -409,6 +572,68 @@ function BCP_RefreshBCSSections(skipBCSUpdate)
     end
 
     BCP_BCSRefreshing = false
+end
+
+-- BCS recalculates (scans gear/auras/talents and rewrites every stat) on every aura, talent, skill or gear
+-- event, often several per second. The first request runs immediately; further ones inside a short window
+-- are merged into one trailing run, so a burst of events costs one recalculation instead of one per event.
+local BCP_BCS_THROTTLE = 0.15
+local BCP_BCSLastRun = 0
+local BCP_BCSPending = false
+local BCP_BCSTimerFrame = CreateFrame("Frame")
+local BCP_OrigBCSUpdateStats
+
+local function BCP_BCSRunNow(self)
+    BCP_BCSLastRun = GetTime()
+    BCP_BCSPending = false
+
+    BCP_OrigBCSUpdateStats(self)
+    BCP_RefreshBCSSections(true)
+end
+
+local function BCP_BCSTrailingOnUpdate()
+    if GetTime() - BCP_BCSLastRun < BCP_BCS_THROTTLE then
+        return
+    end
+
+    BCP_BCSTimerFrame:SetScript("OnUpdate", nil)
+
+    if not BCP_BCSPending then
+        return
+    end
+
+    if PaperDollFrame and PaperDollFrame:IsVisible() and BCS then
+        BCP_BCSRunNow(BCS)
+    else
+        -- window closed meanwhile: catch up when it opens
+        BCP_BCSPending = false
+        BCP_BCSDirty = true
+    end
+end
+
+local function BCP_BCSUpdateStatsHook(self)
+    -- Nothing to redraw while the window is closed; remember it and catch up when it opens.
+    if not (PaperDollFrame and PaperDollFrame:IsVisible()) then
+        BCP_OrigBCSUpdateStats(self)
+        BCP_BCSDirty = true
+        return
+    end
+
+    if BCP_BCSForce or (GetTime() - BCP_BCSLastRun) >= BCP_BCS_THROTTLE then
+        BCP_BCSRunNow(self)
+    else
+        BCP_BCSPending = true
+        BCP_BCSTimerFrame:SetScript("OnUpdate", BCP_BCSTrailingOnUpdate)
+    end
+end
+
+local function BCP_InstallBCSHook()
+    if BCP_OrigBCSUpdateStats or not BCS then
+        return
+    end
+
+    BCP_OrigBCSUpdateStats = BCS.UpdateStats
+    BCS.UpdateStats = BCP_BCSUpdateStatsHook
 end
 
 function BCP_BuildScrollContent(skin, contentFrame, scrollFrame, scrollBar, bcsCardPrefix, bcsCatPrefix, nativeCardPrefix)
@@ -475,12 +700,19 @@ function BCP_BuildScrollContent(skin, contentFrame, scrollFrame, scrollBar, bcsC
 
             skin:ApplyCardBackdrop(card)
 
-            local titleFrame = CreateFrame("Frame", nil, card)
-            titleFrame:SetAllPoints(card)
-            titleFrame:SetFrameLevel(card:GetFrameLevel() + 2)
-            card.bcpTextFrame = titleFrame
+            -- pfUI draws its card backdrop as a child frame that would dim the text, so there the text lives
+            -- in its own frame above it. With the default UI the backdrop belongs to the card itself and the
+            -- text can be drawn straight on the card: one frame less per card inside the scroll area.
+            local textHost = card
 
-            local title = titleFrame:CreateFontString(nil, "OVERLAY")
+            if BCP_IS_USING_PFUI then
+                textHost = CreateFrame("Frame", nil, card)
+                textHost:SetAllPoints(card)
+                textHost:SetFrameLevel(card:GetFrameLevel() + 2)
+                card.bcpTextFrame = textHost
+            end
+
+            local title = textHost:CreateFontString(nil, "OVERLAY")
             local fontPath, fontSize, fontFlags = skin:GetCardTitleFont()
             BCP_SetFontOnce(title, fontPath, math.floor(fontSize * fontScale), fontFlags)
             title:SetPoint("TOP", card, "TOP", 0, -titleTopPad)
@@ -531,13 +763,7 @@ function BCP_BuildScrollContent(skin, contentFrame, scrollFrame, scrollBar, bcsC
 
         if not contentFrame.bcpHooked then
             contentFrame.bcpHooked = true
-            local _Orig_BCS_UpdateStats = BCS.UpdateStats
-
-            BCS.UpdateStats = function(self)
-                _Orig_BCS_UpdateStats(self)
-
-                BCP_RefreshBCSSections(true)
-            end
+            BCP_InstallBCSHook()
         end
     else
         local FRAME_H = math.ceil((cfg.NativeStatRowHeight or BCP_STAT_FRAME_H) * fontScale)
@@ -588,11 +814,15 @@ function BCP_BuildScrollContent(skin, contentFrame, scrollFrame, scrollBar, bcsC
 
             skin:ApplyCardBackdrop(card)
 
-            local titleFrame = CreateFrame("Frame", nil, card)
-            titleFrame:SetAllPoints(card)
-            titleFrame:SetFrameLevel(card:GetFrameLevel() + 2)
+            local textHost = card
 
-            local titleFS = titleFrame:CreateFontString(nil, "OVERLAY")
+            if BCP_IS_USING_PFUI then
+                textHost = CreateFrame("Frame", nil, card)
+                textHost:SetAllPoints(card)
+                textHost:SetFrameLevel(card:GetFrameLevel() + 2)
+            end
+
+            local titleFS = textHost:CreateFontString(nil, "OVERLAY")
             local fontPath, fontSize, fontFlags = skin:GetCardTitleFont()
             BCP_SetFontOnce(titleFS, fontPath, math.floor(fontSize * fontScale), fontFlags)
             titleFS:SetPoint("TOP", card, "TOP", 0, -titleTopPad)
@@ -636,6 +866,9 @@ function BCP_BuildScrollContent(skin, contentFrame, scrollFrame, scrollBar, bcsC
     end
 
     BCP_RefreshBCSSections(false)
+
+    -- The panel width may have changed (wide mode, font scale): put the resistance row back inside it.
+    BCP_FitResistanceRow()
 end
 
 -- FIX: keep the (enlarged) model frame above PaperDollFrame itself, so it still receives the
@@ -722,6 +955,255 @@ local function BCP_HideStockStatPanels()
 end
 
 -- =====================================================
+-- =   Resistance icons (shared by every skin)         =
+-- =====================================================
+-- The row is laid out inside the panel: it is centred between the panel's borders, shrinks (gaps first,
+-- then scale) if the panel is too narrow, and steps away from the character window's close button.
+-- It stays in the SAME frame strata as the panel (only the frame level is raised), so other windows such
+-- as the auction house are drawn over it like over any other part of the character window.
+function BCP_SetupResistanceFrame(infoFrame, scrollFrame, cfg)
+    local rf = CharacterResistanceFrame
+
+    if not (rf and infoFrame) then
+        return
+    end
+
+    BCP_Reparent(rf, infoFrame)
+
+    local strata = infoFrame:GetFrameStrata()
+    local level = infoFrame:GetFrameLevel() + 20
+
+    rf:SetFrameStrata(strata)
+    rf:SetFrameLevel(level)
+
+    if not rf.bcpChildren then
+        local list = {}
+
+        for _, child in ipairs({ rf:GetChildren() }) do
+            table.insert(list, child)
+
+            -- center the resistance number inside its icon
+            for _, region in ipairs({ child:GetRegions() }) do
+                if region:GetObjectType() == "FontString" then
+                    region:ClearAllPoints()
+                    region:SetPoint("CENTER", child, "CENTER", 0, 0)
+                    region:SetDrawLayer("OVERLAY")
+                end
+            end
+        end
+
+        rf.bcpChildren = list
+    end
+
+    for _, child in ipairs(rf.bcpChildren) do
+        child:SetFrameStrata(strata)
+        child:SetFrameLevel(level + 1)
+    end
+
+    rf.bcpInfo = infoFrame
+    rf.bcpCfg = cfg
+    rf.bcpScroll = scrollFrame
+    rf.bcpFitKey = nil
+
+    BCP_FitResistanceRow()
+end
+
+function BCP_FitResistanceRow()
+    local rf = CharacterResistanceFrame
+    local info = rf and rf.bcpInfo
+    local cfg = rf and rf.bcpCfg
+    local children = rf and rf.bcpChildren
+
+    if not (info and cfg and children) then
+        return
+    end
+
+    local n = table.getn(children)
+
+    if n == 0 then
+        return
+    end
+
+    local infoW = info:GetWidth()
+
+    if not infoW or infoW <= 0 then
+        return
+    end
+
+    local itemW = cfg.ResistanceItemWidth
+    local itemH = cfg.ResistanceFrameHeight
+    local gap = cfg.ResistanceItemSpacing
+    local prefScale = cfg.ResistanceScale or 1
+    local inset = (cfg.ResistanceSideInset or 12) + 4
+
+    -- Real width of the last icon (the stock icons can be wider than the layout width)
+    local lastW = children[n]:GetWidth()
+
+    if not lastW or lastW < itemW then
+        lastW = itemW
+    end
+
+    -- Some skins draw the visible window lower than the info panel's own top edge (the panel "hangs" above
+    -- it). Measure how far, so the row is placed inside what the player actually sees.
+    local overhang = 0
+    local refFn = cfg.ResistanceRefFrame
+    local ref = refFn and refFn()
+
+    if ref then
+        local ies = info:GetEffectiveScale()
+        local res = ref:GetEffectiveScale()
+        local it, rt = info:GetTop(), ref:GetTop()
+
+        if ies and ies > 0 and res and it and rt then
+            overhang = (it * ies - rt * res) / ies
+
+            if overhang < 0 then
+                overhang = 0
+            end
+        end
+    end
+
+    -- Vertical position
+    local bandTop = (cfg.ResistanceBandTop or 12) + overhang
+    local rowTop
+
+    if cfg.ResistanceTopAlign then
+        rowTop = bandTop
+    else
+        rowTop = bandTop + (((cfg.ScrollTopPad or 45) - bandTop) - itemH) / 2
+
+        if rowTop < bandTop then
+            rowTop = bandTop
+        end
+    end
+
+    -- Make sure the stats area starts below the row (moves it down only when needed)
+    local scroll = rf.bcpScroll
+
+    if cfg.ResistanceTopAlign and scroll then
+        local needed = math.ceil(rowTop + itemH * prefScale + 4)
+        local current = cfg.ScrollTopPadDyn or cfg.ScrollTopPad or 0
+
+        if needed < (cfg.ScrollTopPad or 0) then
+            needed = cfg.ScrollTopPad
+        end
+
+        if needed ~= current then
+            cfg.ScrollTopPadDyn = needed
+            scroll:SetPoint("TOPLEFT", info, "TOPLEFT", cfg.ResistanceScrollX or 0, -needed)
+
+            -- The visible stats area just got shorter: let the scroll bar reach the end of the content
+            local barName = scroll:GetName() and string.gsub(scroll:GetName(), "ScrollFrame$", "ScrollBar")
+            local bar = barName and getglobal(barName)
+            local content = scroll:GetScrollChild()
+
+            if bar and bar:IsShown() and content and content.bcpContentBuilt then
+                local minV, maxV = bar:GetMinMaxValues()
+
+                bar:SetMinMaxValues(minV, math.max(0, maxV + (needed - current)))
+            end
+        end
+    end
+
+    local leftBound = inset
+    local rightBound = infoW - inset
+
+    -- Keep clear of the close button when it sits on top of the panel
+    local btn = CharacterFrameCloseButton
+
+    if btn and btn:IsVisible() then
+        local ies = info:GetEffectiveScale()
+        local il, it = info:GetLeft(), info:GetTop()
+        local bl, br, bt, bb = btn:GetLeft(), btn:GetRight(), btn:GetTop(), btn:GetBottom()
+
+        if ies and ies > 0 and il and it and bl and br and bt and bb then
+            local bes = btn:GetEffectiveScale()
+            local relL = (bl * bes - il * ies) / ies
+            local relR = (br * bes - il * ies) / ies
+            local relTop = (it * ies - bt * bes) / ies
+            local relBottom = (it * ies - bb * bes) / ies
+
+            if relR > 0 and relL < infoW and relBottom > rowTop and relTop < rowTop + itemH then
+                if (relL + relR) / 2 >= infoW / 2 then
+                    if relL - 3 < rightBound then
+                        rightBound = relL - 3
+                    end
+                elseif relR + 3 > leftBound then
+                    leftBound = relR + 3
+                end
+            end
+        end
+    end
+
+    local avail = rightBound - leftBound
+
+    if avail < 40 then
+        avail = 40
+    end
+
+    -- Fit: shrink the gaps first (down to 1), then the whole row
+    local scale = prefScale
+    local rowW = (n - 1) * (itemW + gap) + lastW
+
+    if rowW * scale > avail then
+        local fitGap = (avail / scale - (n - 1) * itemW - lastW) / (n - 1)
+
+        if fitGap >= 1 then
+            gap = fitGap
+        else
+            gap = 1
+            rowW = (n - 1) * (itemW + gap) + lastW
+            scale = avail / rowW
+        end
+
+        rowW = (n - 1) * (itemW + gap) + lastW
+    end
+
+    local x = leftBound + (avail - rowW * scale) / 2
+
+    if x < leftBound then
+        x = leftBound
+    end
+
+    local key = x .. "|" .. rowTop .. "|" .. scale .. "|" .. gap
+
+    if rf.bcpFitKey == key then
+        return
+    end
+
+    rf.bcpFitKey = key
+
+    rf:SetScale(scale)
+    rf:SetWidth(rowW)
+    rf:SetHeight(itemH)
+    rf:ClearAllPoints()
+    rf:SetPoint("TOPLEFT", info, "TOPLEFT", x / scale, -rowTop / scale)
+
+    for i, child in ipairs(children) do
+        child:ClearAllPoints()
+        child:SetPoint("TOPLEFT", rf, "TOPLEFT", (i - 1) * (itemW + gap), 0)
+    end
+end
+
+-- Frame positions are only known a frame after a window is shown, so fit again on the next two frames.
+local BCP_FitFrame = CreateFrame("Frame")
+local BCP_FitPasses = 0
+
+local function BCP_FitOnUpdate()
+    BCP_FitPasses = BCP_FitPasses - 1
+    BCP_FitResistanceRow()
+
+    if BCP_FitPasses <= 0 then
+        BCP_FitFrame:SetScript("OnUpdate", nil)
+    end
+end
+
+function BCP_QueueResistanceFit()
+    BCP_FitPasses = 2
+    BCP_FitFrame:SetScript("OnUpdate", BCP_FitOnUpdate)
+end
+
+-- =====================================================
 -- =   Outfitter "Enable none" / "Enable all" buttons   =
 -- =====================================================
 -- Outfitter's own XML names them OutfitterEnableAll (label "Enable none") and OutfitterEnableNone (label
@@ -752,6 +1234,8 @@ local function BCP_OutfitterBtnWanted()
 
     return not (cfg and cfg.Off)
 end
+
+local BCP_EnsureBtnEnforcer -- defined below; the enforcer only exists once Outfitter's buttons do
 
 function BCP_PlaceOutfitterButtons()
     local left = getglobal("OutfitterEnableAll")
@@ -802,27 +1286,58 @@ function BCP_PlaceOutfitterButtons()
             end)
         end
     end
+
+    BCP_EnsureBtnEnforcer()
 end
 
 -- Something else (Outfitter or the UI skin) may move the buttons again after we placed them. While they
--- are visible, check every frame (two cheap anchor reads) and put them back if their anchor is not ours.
-local BCP_BtnEnforcer = CreateFrame("Frame")
+-- are visible, check them a few times a second (two cheap anchor reads) and put them back if their anchor
+-- is not ours.
+-- PERF: the enforcer frame is only created once Outfitter's buttons really exist. Without Outfitter there is
+-- nothing to enforce, so no OnUpdate runs at all (it used to run on every frame of an open character window).
+-- It is a child of PaperDollFrame, so the client only runs its OnUpdate while the paper doll is visible.
+local BCP_BtnEnforcer
+local BCP_BtnElapsed = 0
+local BCP_BtnLeft, BCP_BtnRight, BCP_BtnLeftSlot, BCP_BtnRightSlot
 
-BCP_BtnEnforcer:SetScript("OnUpdate", function()
-    local left = getglobal("OutfitterEnableAll")
-    local right = getglobal("OutfitterEnableNone")
+local function BCP_BtnEnforcerOnUpdate()
+    BCP_BtnElapsed = BCP_BtnElapsed + arg1
 
-    if not (left and right and left:IsVisible()) or not BCP_OutfitterBtnWanted() then
+    if BCP_BtnElapsed < 0.25 then
         return
     end
 
-    local _, relLeft = left:GetPoint()
-    local _, relRight = right:GetPoint()
+    BCP_BtnElapsed = 0
 
-    if relLeft ~= getglobal("CharacterHeadSlot") or relRight ~= getglobal("CharacterHandsSlot") then
+    if not (BCP_BtnLeft:IsVisible() and BCP_OutfitterBtnWanted()) then
+        return
+    end
+
+    local _, relLeft = BCP_BtnLeft:GetPoint()
+    local _, relRight = BCP_BtnRight:GetPoint()
+
+    if relLeft ~= BCP_BtnLeftSlot or relRight ~= BCP_BtnRightSlot then
         BCP_PlaceOutfitterButtons()
     end
-end)
+end
+
+BCP_EnsureBtnEnforcer = function()
+    if BCP_BtnEnforcer or not PaperDollFrame then
+        return
+    end
+
+    BCP_BtnLeft = getglobal("OutfitterEnableAll")
+    BCP_BtnRight = getglobal("OutfitterEnableNone")
+    BCP_BtnLeftSlot = getglobal("CharacterHeadSlot")
+    BCP_BtnRightSlot = getglobal("CharacterHandsSlot")
+
+    if not (BCP_BtnLeft and BCP_BtnRight and BCP_BtnLeftSlot and BCP_BtnRightSlot) then
+        return
+    end
+
+    BCP_BtnEnforcer = CreateFrame("Frame", nil, PaperDollFrame)
+    BCP_BtnEnforcer:SetScript("OnUpdate", BCP_BtnEnforcerOnUpdate)
+end
 
 SLASH_BCPBTN1 = "/bcpbtn"
 SlashCmdList["BCPBTN"] = function(msg)
@@ -876,57 +1391,141 @@ end
 
 BCP_RefreshCount = {}
 
+-- Widgets per slot, looked up once per panel (instead of 3 string concatenations + global lookups per
+-- slot on every refresh), together with what is currently displayed so unchanged slots cost nothing.
+local BCP_SlotRefs = {}
+local BCP_RefCtx = {}
+
+local function BCP_GetSlotRefs(prefix)
+    local refs = BCP_SlotRefs[prefix]
+
+    if refs then
+        return refs
+    end
+
+    refs = {}
+
+    local found = false
+
+    for i, info in ipairs(BCP_SLOTS) do
+        local perm = getglobal(prefix .. info.tag .. "_Perm")
+        local temp = getglobal(prefix .. info.tag .. "_Temp")
+        local missing = getglobal(prefix .. info.tag .. "_MissingEnchant")
+
+        if perm or temp or missing then
+            found = true
+        end
+
+        refs[i] = {
+            perm = perm,
+            temp = temp,
+            missing = missing,
+            itemId = false,
+            permId = false,
+            tempId = false,
+            settled = false,
+        }
+    end
+
+    -- Don't keep a lookup made before the XML widgets exist
+    if found then
+        BCP_SlotRefs[prefix] = refs
+    end
+
+    return refs
+end
+
+local function BCP_ApplyRef(ref, permText, tempText, showMissing)
+    if ref.permText ~= permText then
+        ref.permText = permText
+
+        if ref.perm then
+            ref.perm:SetText(permText)
+        end
+    end
+
+    if ref.tempText ~= tempText then
+        ref.tempText = tempText
+
+        if ref.temp then
+            ref.temp:SetText(tempText)
+        end
+    end
+
+    if ref.shownMissing ~= showMissing then
+        ref.shownMissing = showMissing
+
+        if ref.missing then
+            if showMissing then
+                ref.missing:Show()
+            else
+                ref.missing:Hide()
+            end
+        end
+    end
+end
+
 local function BCP_Refresh(unit, prefix)
     BCP_RefreshCount[prefix] = (BCP_RefreshCount[prefix] or 0) + 1
     local skin = BCP_GetActiveSkin()
     BCP_Init(prefix, skin.FrameValues)
 
-    if prefix == "BCP_" then
-        -- Hide the stock stats panels (and keep them hidden if something shows them again)
-        BCP_HideStockStatPanels()
+    local refs = BCP_GetSlotRefs(prefix)
+    local cfg = BCPConfig
+    local missingCfg = cfg.MissingEnchants
+    local showPerm, showTemp
+
+    if unit == "player" then
+        showPerm = cfg.PermanentEnchants.ShowOnCharPanel
+        showTemp = cfg.TemporaryEnchants.ShowOnCharPanel
+    else
+        showPerm = cfg.PermanentEnchants.ShowOnInspect
+        showTemp = cfg.TemporaryEnchants.ShowOnInspect
     end
 
-    for _, info in ipairs(BCP_SLOTS) do
-        local tag = info.tag
-        local permText, tempText, isMissing = GetEnchantTexts(unit, info.slotId, info.libSlot)
+    local unitLevel = UnitLevel(unit)
 
-        local permFS = getglobal(prefix .. tag .. "_Perm")
+    -- Everything besides the item itself that changes what is shown, folded into one number. When it
+    -- changes (a setting was toggled, another level) every slot is worked out again.
+    local ctx = (showPerm and 1 or 0) + (showTemp and 2 or 0) + (missingCfg.Show and 4 or 0) +
+        (missingCfg.OnlyAtLevel60 and 8 or 0) + (missingCfg.MinimumQuality or 0) * 16 + (unitLevel or 0) * 256
 
-        if unit == "player" and not BCPConfig.PermanentEnchants.ShowOnCharPanel then
-            permText = ""
+    if BCP_RefCtx[prefix] ~= ctx then
+        BCP_RefCtx[prefix] = ctx
+
+        for i = 1, table.getn(refs) do
+            refs[i].settled = false
+        end
+    end
+
+    local canShowMissing = missingCfg.Show and (not missingCfg.OnlyAtLevel60 or (unitLevel and unitLevel == 60))
+
+    for i, info in ipairs(BCP_SLOTS) do
+        local ref = refs[i]
+        local itemInfo = GetEquippedItem(unit, info.slotId)
+        local itemId, permId, tempId = 0, 0, 0
+
+        if itemInfo then
+            itemId = itemInfo.itemId or 0
+            permId = itemInfo.permanentEnchantId or 0
+            tempId = itemInfo.tempEnchantId or 0
         end
 
-        if unit ~= "player" and not BCPConfig.PermanentEnchants.ShowOnInspect then
-            permText = ""
-        end
+        if not ref.settled or ref.itemId ~= itemId or ref.permId ~= permId or ref.tempId ~= tempId then
+            local permText, tempText, isMissing, complete = GetEnchantTexts(unit, info.slotId, info.libSlot, itemInfo or false)
 
-        if unit == "player" and not BCPConfig.TemporaryEnchants.ShowOnCharPanel then
-            tempText = ""
-        end
+            ref.itemId, ref.permId, ref.tempId = itemId, permId, tempId
+            ref.settled = complete
 
-        if unit ~= "player" and not BCPConfig.TemporaryEnchants.ShowOnInspect then
-            tempText = ""
-        end
-
-        if permFS then
-            permFS:SetText(permText)
-        end
-
-        local tempFS = getglobal(prefix .. tag .. "_Temp")
-
-        if tempFS then
-            tempFS:SetText(tempText)
-        end
-
-        local missingTex = getglobal(prefix .. tag .. "_MissingEnchant")
-        local unitLevel = UnitLevel(unit)
-
-        if missingTex then
-            if isMissing and BCPConfig.MissingEnchants.Show and (not BCPConfig.MissingEnchants.OnlyAtLevel60 or (unitLevel and unitLevel == 60)) then
-                missingTex:Show()
-            else
-                missingTex:Hide()
+            if not showPerm then
+                permText = ""
             end
+
+            if not showTemp then
+                tempText = ""
+            end
+
+            BCP_ApplyRef(ref, permText, tempText, (isMissing and canShowMissing) and true or false)
         end
     end
 end
@@ -1004,8 +1603,18 @@ function PaperDollFrame_OnShow()
     end
 
     BCP_GetActiveSkin():OnPaperDollShow()
+    BCP_HideStockStatPanels()
     BCP_PlaceOutfitterButtons()
     BCP_Refresh("player", "BCP_")
+
+    -- Layout positions settle a frame later, so fit the resistance row now and again right after
+    BCP_FitResistanceRow()
+    BCP_QueueResistanceFit()
+
+    if BCP_BCSDirty then
+        BCP_BCSDirty = false
+        BCP_QueueRefresh(false, true)
+    end
 end
 
 local _Orig_PaperDollFrame_OnEvent = PaperDollFrame_OnEvent
@@ -1041,7 +1650,7 @@ local function BCP_QueueOnUpdate()
     end
 end
 
-local function BCP_QueueRefresh(items, stats)
+BCP_QueueRefresh = function(items, stats)
     if items then BCP_QueueItems = true end
     if stats then BCP_QueueStats = true end
 
@@ -1074,22 +1683,19 @@ function PaperDollFrame_OnEvent(event, arg1)
 end
 
 local BCP_GUIDFallbackFrame = CreateFrame("Frame")
-local BCP_GUIDFallbackPending = false
 local BCP_GUIDFallbackTimer = 0
 
 BCP_GUIDFallbackFrame:RegisterEvent("UNIT_INVENTORY_CHANGED")
-BCP_GUIDFallbackFrame:SetScript("OnUpdate", function()
-    if not BCP_GUIDFallbackPending then
-        return
-    end
 
+-- Only attached while a refresh is pending, so it costs nothing the rest of the time.
+local function BCP_GUIDFallbackOnUpdate()
     BCP_GUIDFallbackTimer = BCP_GUIDFallbackTimer - arg1
 
     if BCP_GUIDFallbackTimer > 0 then
         return
     end
 
-    BCP_GUIDFallbackPending = false
+    BCP_GUIDFallbackFrame:SetScript("OnUpdate", nil)
 
     if not PaperDollFrame or not PaperDollFrame:IsVisible() then
         return
@@ -1102,7 +1708,7 @@ BCP_GUIDFallbackFrame:SetScript("OnUpdate", function()
         BCS.needScanSkills = true
         BCS:UpdateStats()
     end
-end)
+end
 
 BCP_GUIDFallbackFrame:SetScript("OnEvent", function()
     if event ~= "UNIT_INVENTORY_CHANGED" then
@@ -1117,6 +1723,11 @@ BCP_GUIDFallbackFrame:SetScript("OnEvent", function()
         return
     end
 
+    -- Nothing to refresh while the window is closed (it refreshes itself when it opens)
+    if not (PaperDollFrame and PaperDollFrame:IsVisible()) then
+        return
+    end
+
     local isPlayer = false
     local ok, result = pcall(UnitIsUnit, "player", arg1)
 
@@ -1128,8 +1739,8 @@ BCP_GUIDFallbackFrame:SetScript("OnEvent", function()
         return
     end
 
-    BCP_GUIDFallbackPending = true
     BCP_GUIDFallbackTimer = 0.2
+    BCP_GUIDFallbackFrame:SetScript("OnUpdate", BCP_GUIDFallbackOnUpdate)
 end)
 
 -- ===========================
@@ -1145,14 +1756,18 @@ local function BCP_GetInspectUnit()
 end
 
 function BCP_ClearInspectTexts()
-    for _, info in ipairs(BCP_SLOTS) do
-        local permFS = getglobal("BCP_Inspect_" .. info.tag .. "_Perm")
-        local tempFS = getglobal("BCP_Inspect_" .. info.tag .. "_Temp")
-        local missingTex = getglobal("BCP_Inspect_" .. info.tag .. "_MissingEnchant")
+    local refs = BCP_GetSlotRefs("BCP_Inspect_")
 
-        if permFS then permFS:SetText("") end
-        if tempFS then tempFS:SetText("") end
-        if missingTex then missingTex:Hide() end
+    for i = 1, table.getn(refs) do
+        local ref = refs[i]
+
+        -- forget what was shown, so the next refresh works the slot out again
+        ref.settled = false
+        ref.permText, ref.tempText, ref.shownMissing = nil, nil, nil
+
+        if ref.perm then ref.perm:SetText("") end
+        if ref.temp then ref.temp:SetText("") end
+        if ref.missing then ref.missing:Hide() end
     end
 end
 
@@ -1294,6 +1909,14 @@ BCP_InspectHookFrame:RegisterEvent("PLAYER_ENTERING_WORLD")
 BCP_InspectHookFrame:RegisterEvent("PLAYER_TARGET_CHANGED")
 BCP_InspectHookFrame:SetScript("OnEvent", function()
     BCP_InstallInspectHooks()
+
+    -- Everything is in place: stop reacting to every target change. ADDON_LOADED stays registered, in case
+    -- another addon redefines the inspect window later.
+    if BCP_InspectHooksReady and InspectFrame and InspectFrame.bcpHideHooked and InspectPaperDollFrame and
+        InspectPaperDollFrame.bcpHideHooked then
+        BCP_InspectHookFrame:UnregisterEvent("PLAYER_TARGET_CHANGED")
+        BCP_InspectHookFrame:UnregisterEvent("PLAYER_ENTERING_WORLD")
+    end
 end)
 
 BCP_InstallInspectHooks()
@@ -1420,4 +2043,180 @@ SlashCmdList["BCPINSPECT"] = function()
     else
         say("BCP_Inspect_Legs_Perm does not exist")
     end
+end
+
+
+-- ====================================
+-- =   /bcpperf  (what does it cost?) =
+-- ====================================
+-- Open the Character tab, type /bcpperf and leave the mouse alone for about 20 seconds. Each part of the
+-- window is hidden in turn while the frame rate is measured, and the cost of every part is printed in
+-- milliseconds per frame. Nothing is changed permanently: everything is shown again at the end (or when you
+-- type /bcpperf again, or close the window).
+-- Tip: if every line comes out the same, your FPS is being held by VSync or a frame limiter; switch it off
+-- while testing.
+local BCP_PerfFrame = CreateFrame("Frame")
+local BCP_PerfRun = nil
+
+local BCP_PERF_SETTLE = 0.6 -- seconds to let a change settle before counting
+local BCP_PERF_LENGTH = 2.5 -- seconds measured per step
+
+local BCP_PERF_PHASES = {
+    { name = "everything on", parts = {} },
+    { name = "3D character model hidden", parts = { "model" } },
+    { name = "stats panel hidden (cards, text, background)", parts = { "stats" } },
+    { name = "enchant texts hidden", parts = { "enchants" } },
+    { name = "resistance icons hidden", parts = { "resist" } },
+    { name = "all of Better Character Panel hidden (model kept)", parts = { "stats", "enchants", "resist" } },
+    { name = "everything on again (drift check)", parts = {} },
+}
+
+local function BCP_PerfSay(text)
+    DEFAULT_CHAT_FRAME:AddMessage("|cff66ccffBCP perf|r " .. text)
+end
+
+local function BCP_PerfFrameFor(part)
+    if part == "model" then
+        return CharacterModelFrame
+    elseif part == "stats" then
+        return BCPPFUICharacterInformationFrame or BCPVanillaCharacterInformationFrame
+    elseif part == "enchants" then
+        return getglobal("BCP")
+    elseif part == "resist" then
+        return CharacterResistanceFrame
+    end
+
+    return nil
+end
+
+local function BCP_PerfRestore(run)
+    for _, f in ipairs(run.hidden) do
+        f:Show()
+    end
+
+    run.hidden = {}
+end
+
+local function BCP_PerfBegin(run)
+    local phase = BCP_PERF_PHASES[run.index]
+
+    run.hidden = {}
+
+    for _, part in ipairs(phase.parts) do
+        local f = BCP_PerfFrameFor(part)
+
+        if f and f:IsShown() then
+            f:Hide()
+            table.insert(run.hidden, f)
+        end
+    end
+
+    run.phaseStart = GetTime()
+    run.measureStart = nil
+    run.frames = 0
+end
+
+local function BCP_PerfFinish(run)
+    local results = run.results
+    local count = table.getn(BCP_PERF_PHASES)
+    local base = (results[1] + results[count]) / 2
+    local lo, hi = results[1], results[1]
+
+    for i = 1, count do
+        if results[i] < lo then lo = results[i] end
+        if results[i] > hi then hi = results[i] end
+    end
+
+    BCP_PerfSay(string.format("everything on: %.1f FPS  (%.2f ms per frame)", base, 1000 / base))
+
+    for i = 2, count - 1 do
+        local saved = (1000 / base) - (1000 / results[i])
+
+        BCP_PerfSay(string.format("%s: %.1f FPS  ->  this part costs about %.2f ms per frame", BCP_PERF_PHASES[i].name,
+            results[i], saved))
+    end
+
+    BCP_PerfSay(string.format("drift between the two 'everything on' runs: %.1f FPS (differences below that are noise)",
+        math.abs(results[1] - results[count])))
+
+    if hi - lo < 1.5 then
+        BCP_PerfSay("All results are almost identical: your FPS is probably capped (VSync or a frame limiter). Turn it off and run /bcpperf again.")
+    end
+
+    BCP_PerfSay("Reference: close the Character window and compare with the FPS you get in the world. To shrink the 3D model use /bcpmodel 1 1 1 (saved; /bcpmodel reset undoes it).")
+end
+
+local function BCP_PerfStop(run, reason)
+    BCP_PerfFrame:SetScript("OnUpdate", nil)
+    BCP_PerfRestore(run)
+    BCP_PerfRun = nil
+
+    if reason then
+        BCP_PerfSay(reason)
+    end
+end
+
+local function BCP_PerfOnUpdate()
+    local run = BCP_PerfRun
+
+    if not run then
+        BCP_PerfFrame:SetScript("OnUpdate", nil)
+        return
+    end
+
+    if not (PaperDollFrame and PaperDollFrame:IsVisible()) then
+        BCP_PerfStop(run, "stopped: the Character window was closed.")
+        return
+    end
+
+    local now = GetTime()
+
+    if not run.measureStart then
+        if now - run.phaseStart >= BCP_PERF_SETTLE then
+            run.measureStart = now
+            run.frames = 0
+        end
+
+        return
+    end
+
+    run.frames = run.frames + 1
+
+    local elapsed = now - run.measureStart
+
+    if elapsed < BCP_PERF_LENGTH then
+        return
+    end
+
+    run.results[run.index] = run.frames / elapsed
+    BCP_PerfRestore(run)
+    run.index = run.index + 1
+
+    if run.index > table.getn(BCP_PERF_PHASES) then
+        BCP_PerfStop(run)
+        BCP_PerfFinish(run)
+    else
+        BCP_PerfBegin(run)
+    end
+end
+
+SLASH_BCPPERF1 = "/bcpperf"
+SlashCmdList["BCPPERF"] = function()
+    if BCP_PerfRun then
+        BCP_PerfStop(BCP_PerfRun, "cancelled.")
+        return
+    end
+
+    if not (PaperDollFrame and PaperDollFrame:IsVisible()) then
+        BCP_PerfSay("Open the Character window (Character tab) first, then type /bcpperf again.")
+        return
+    end
+
+    BCP_PerfRun = { index = 1, results = {}, hidden = {} }
+
+    BCP_PerfSay("measuring, about " .. math.floor(table.getn(BCP_PERF_PHASES) * (BCP_PERF_SETTLE + BCP_PERF_LENGTH)) ..
+        " seconds. Keep the Character window open and the mouse still. Type /bcpperf again to cancel.")
+
+    BCP_PerfBegin(BCP_PerfRun)
+    BCP_PerfFrame:SetScript("OnUpdate", BCP_PerfOnUpdate)
 end
